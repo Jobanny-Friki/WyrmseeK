@@ -1,9 +1,11 @@
-# Locate KRunner plugin
+# WyrmseeK, A rewrite of Locate-KRunner
 
 ## Install
 
-./install.sh
+    ./install.sh
 
 ## Uninstall
 
-./uninstall.sh
+    ./uninstall.sh
+
+Personal use project, Baloo was already getting on my nerves.
