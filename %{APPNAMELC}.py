@@ -1,5 +1,4 @@
 #!/usr/bin/python
-# flake8: noqa: PLR2004
 
 """
 +------------+
@@ -7,22 +6,22 @@
 +------------+
 The Ancient File Hunter
 
-┄┄┄Overview
+───Overview
 
 A lightweight, high-performance KRunner plugin that integrates
 locate / plocate to provide fast file searching in KDE Plasma,
 with intelligent scoring, caching, and debounced asynchronous
 execution.
 
-┄┄┄Core Features
+───Core Features
 
-• Uses locate / plocate for instant filesystem-wide search
-• Asynchronous execution to keep KRunner responsive
-• Debouncing to avoid spawning processes on every keystroke
-• LRU query cache with prefix-based reuse
-• Progressive result updates via MatchesChanged
-• Smart cache refinement (avoids truncated result sets)
-• Relevance scoring based on:
+- Uses locate / plocate for instant filesystem-wide search
+- Asynchronous execution to keep KRunner responsive
+- Debouncing to avoid spawning processes on every keystroke
+- LRU query cache with prefix-based reuse
+- Progressive result updates via MatchesChanged
+- Smart cache refinement (avoids truncated result sets)
+- Relevance scoring based on:
 
   • filename matching with position weighting
   • directory depth
@@ -30,36 +29,36 @@ execution.
   • executability
   • user-defined scoring rules
 
-• MIME-aware icons (GIO, optional python-magic)
+- MIME-aware icons (GIO, optional python-magic)
 
-• Actions:
+- Actions:
 
   • Open file
   • Open parent folder
   • Copy full path to clipboard
 
-══════════════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════════════
 
-┄┄┄Requirements
+───Requirements
 
-• Python 3.10+ (3.11+ recommended for native tomllib)
-• plocate or locate
-• Python packages:
+- Python 3.10+ (3.11+ recommended for native tomllib)
+- plocate or locate
+- Python packages:
 
   • dbus-python
   • PyGObject
   • tomli (for Python 3.10, built-in tomllib for 3.11+)
   • python-magic (optional, for enhanced MIME detection)
 
-══════════════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════════════
 
-┄┄┄Configuration
+───Configuration
 
 Config file (TOML format):
 
-────────────────────────────────────
+────────────────────────────────
 ~/.config/locate-krunner/config.toml
-────────────────────────────────────
+────────────────────────────────
 
 Example:
 
@@ -106,21 +105,21 @@ Example:
 │ score = -1.0                             │
 ╰──────────────────────────────────────────╯
 
-┄┄┄Configuration Notes
+───Configuration Notes
 
-• binary: Path to locate binary (auto-detects plocate/locate)
-• opts: Command-line options (auto-adds -l 25 if missing)
-• opener: File opener command (auto-detects mimeo/handlr/xdg-open)
-• clipboard_cmd: Clipboard command (auto-detects wl-copy/xclip/xsel)
-• rules: Native TOML array of tables (cleaner than INI)
+- binary: Path to locate binary (auto-detects plocate/locate)
+- opts: Command-line options (auto-adds -l 25 if missing)
+- opener: File opener command (auto-detects mimeo/handlr/xdg-open)
+- clipboard_cmd: Clipboard command (auto-detects wl-copy/xclip/xsel)
+- rules: Native TOML array of tables (cleaner than INI)
   - patterns can be a string or array of strings
   - score is a float (positive = boost, negative = penalty)
-• mod_time_half_life_days: Files this old have 50% of max time bonus
-• All numeric configs have safe defaults if missing
+- mod_time_half_life_days: Files this old have 50% of max time bonus
+- All numeric configs have safe defaults if missing
 
-══════════════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════════════
 
-┄┄┄How It Works (High Level)
+───How It Works (High Level)
 
  1. User types a query in KRunner
  2. Query is normalized and debounced (200ms default)
@@ -132,40 +131,41 @@ Example:
  8. Final results cached (FIFO eviction at 500 queries)
  9. Old searches canceled cooperatively every 10 iterations
 
-══════════════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════════════
 
-┄┄┄DBus Interface
+───DBus Interface
 
 Implements org.kde.krunner1:
 
-• Match(query) → results
-• Actions() → open / parent / copy
-• Run(data, action_id)
-• MatchesChanged(query, results) for progressive updates
+- Match(query) → results
+- Actions() → open / parent / copy
+- Run(data, action_id)
+- MatchesChanged(query, results) for progressive updates
 
-══════════════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════════════
 
-┄┄┄Performance Notes
+───Performance Notes
 
-• Single worker thread prevents CPU saturation
-• Cached filesystem metadata avoids repeated stat() calls
-• Prefix-based cache reuse with truncation detection
-• Memory-bounded cache (max 500 queries, ~25MB)
-• Streaming processing (not bulk read) for first results <100ms
-• Quick-score pre-filter after 100 paths (60% CPU reduction)
-• Maximum 1000 paths processed per search (timeout protection)
+- Single worker thread prevents CPU saturation
+- Cached filesystem metadata avoids repeated stat() calls
+- Prefix-based cache reuse with truncation detection
+- Memory-bounded cache (max 500 queries, ~25MB)
+- Streaming processing (not bulk read) for first results <100ms
+- Quick-score pre-filter after 100 paths (60% CPU reduction)
+- Maximum 1000 paths processed per search (timeout protection)
+- Lazy hydration: icons/metadata computed only for top results
 
-══════════════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════════════
 
-┄┄┄Migration from INI
+───Migration from INI
 
 If migrating from config.ini to config.toml:
 
-• Rename scoring_rule_N entries to [[rules]] array
-• Quote string values: binary = plocate → binary = "plocate"
-• Numbers can be unquoted: min_len = "3" → min_len = 3
-• Arrays use native syntax: opts = ["-i", "-l", "25"]
-• Move [Settings] → [settings] (lowercase)
+- Rename scoring_rule_N entries to [[rules]] array
+- Quote string values: binary = plocate → binary = "plocate"
+- Numbers can be unquoted: min_len = "3" → min_len = 3
+- Arrays use native syntax: opts = ["-i", "-l", "25"]
+- Move [Settings] → [settings] (lowercase)
 
 See config.toml.example for full annotated configuration.
 """
@@ -182,7 +182,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from fnmatch import fnmatch
 from functools import lru_cache
-from operator import attrgetter
+from operator import itemgetter
 from shlex import split as shlex_split
 from threading import Lock as threading_Lock
 from time import time as time_time
@@ -204,15 +204,17 @@ ICON_UNKNOWN = sys.intern("unknown")
 TYPE_FILE = sys.intern("FILE")
 TYPE_FOLDER = sys.intern("FOLDER")
 TYPE_OCTET = sys.intern("OCTET-STREAM")
+IO_CHUNK_SIZE = 65536
 
 
 def read_config(path: str) -> dict[str, Any]:
 	try:
 		with open(path, "rb") as f:
 			data = tomllib.load(f)
-
 		return data.get("settings", data)
-	except FileNotFoundError:
+	except (FileNotFoundError, PermissionError):
+		return {}
+	except Exception:
 		return {}
 
 
@@ -254,7 +256,6 @@ def _find_command(*candidates: str) -> str | None:
 	for cmd in candidates:
 		if found := shutil.which(cmd):
 			return found
-
 	return None
 
 
@@ -269,6 +270,8 @@ def _run_subprocess_input(cmd: list[str], text_input: str) -> bool:
 		)
 	except (subprocess.SubprocessError, OSError):
 		return False
+	except subprocess.TimeoutExpired:
+		return False
 	else:
 		return True
 
@@ -276,10 +279,11 @@ def _run_subprocess_input(cmd: list[str], text_input: str) -> bool:
 @lru_cache(maxsize=CACHE_BIG)
 def cached_path_metadata(path: str) -> tuple[bool, float | None, int, int]:
 	try:
-		stat_info = os.stat(path)
+		stat_info = os.stat(path, follow_symlinks=False)
 	except (OSError, FileNotFoundError):
 		return False, None, 0, 0
-
+	except PermissionError:
+		return False, None, 0, 0
 	is_dir = (stat_info.st_mode & 0o170000) == 0o040000
 	return is_dir, stat_info.st_mtime, stat_info.st_size, stat_info.st_mode
 
@@ -290,6 +294,8 @@ def cached_magic_mime(path: str) -> tuple[str, str]:
 		mime_type = magic_from_file(path, mime=True)
 		return intern_pair(mime_type.replace("/", "-"), mime_type.split("/")[-1].upper())
 	except (OSError, ValueError, TypeError):
+		return intern_pair(ICON_UNKNOWN, TYPE_FILE)
+	except PermissionError:
 		return intern_pair(ICON_UNKNOWN, TYPE_FILE)
 
 
@@ -308,6 +314,8 @@ def get_icon_for_extension(filename: str) -> tuple[str, str]:
 		return intern_pair(icon_name, subtext)
 	except (TypeError, AttributeError, ValueError):
 		return intern_pair(ICON_UNKNOWN, TYPE_FILE)
+	except Exception:
+		return intern_pair(ICON_UNKNOWN, TYPE_FILE)
 
 
 @lru_cache(maxsize=CACHE_MED)
@@ -315,12 +323,10 @@ def get_icon_and_subtext(path: str) -> tuple[str, str]:
 	is_dir, _, _, _ = cached_path_metadata(path)
 	if is_dir:
 		return intern_pair("folder", TYPE_FOLDER)
-
 	basename = os.path.basename(path)
 	icon, subtext = get_icon_for_extension(basename)
 	if subtext == TYPE_OCTET and MAGICMIME:
 		return cached_magic_mime(path)
-
 	return icon, subtext
 
 
@@ -348,14 +354,14 @@ class RelevanceScorer:
 				for p in patterns:
 					if fnmatch(path_lower, p):
 						score += action
-
 		score -= path.count(os.sep) * self.depth_penalty
 		return score
 
 	def _modification_bonus(self, mtime: float | None, now: float) -> float:
 		if not mtime:
 			return 0.0
-
+		if mtime > now:
+			return 0.0
 		age = max(0.0, now - mtime)
 		return self.mod_time_weight * math.exp(-age / self.mod_time_half_life)
 
@@ -366,7 +372,7 @@ class RelevanceScorer:
 
 		score = self._get_static_score(path, path_lower)
 		name_lower = os.path.basename(path_lower)
-		name_len = len(name_lower)
+		name_len = max(1, len(name_lower))
 		matches = [
 			math.pow(
 				math.exp(-2.5 * name_lower.find(w) / name_len) * math.pow(len(w) / name_len, 0.7),
@@ -382,13 +388,13 @@ class RelevanceScorer:
 		if not is_dir:
 			if mode & 0o111:
 				score += self.exec_bonus
-
 			score += self._modification_bonus(mtime, now)
 
+		bounded_score = max(-20.0, min(20.0, score))
 		try:
-			return 1.0 / (1.0 + math.exp(-score * self.sigmoid_steepness))
+			return 1.0 / (1.0 + math.exp(-bounded_score * self.sigmoid_steepness))
 		except OverflowError:
-			return 1.0 if score > 0 else 0.0
+			return 1.0 if bounded_score > 0 else 0.0
 
 	def quick_score(self, path: str, words: tuple[str, ...]) -> float:
 		path_lower = path.lower()
@@ -396,13 +402,12 @@ class RelevanceScorer:
 		score = sum(1.0 for w in words if w in basename)
 		if not score:
 			return 0.0
-
 		score -= path.count(os.sep) * 0.01
 		return max(0.0, score)
 
 
 def build_dbus_response(results: list[LightResult]) -> list:
-	return [(r.path, r.path, r.icon, 100, r.score, {"subtext": r.subtext}) for r in results[:MAX_TOTAL_RESULTS]]
+	return [(r.path, r.path, r.icon, 100, max(0.0, min(1.0, r.score)), {"subtext": r.subtext}) for r in results[:MAX_TOTAL_RESULTS]]
 
 
 @lru_cache(maxsize=CACHE_MED)
@@ -417,7 +422,6 @@ def _compile_filter_regex(words: tuple[str, ...]) -> re.Pattern | None:
 def filter_existing_results(results: tuple[LightResult, ...], words: tuple[str, ...]) -> list:
 	if not words:
 		return build_dbus_response(list(results))
-
 	regex = _compile_filter_regex(words)
 	filtered = [r for r in results if regex.search(r.path)] if regex else [r for r in results if all(w in r.path.lower() for w in words)]
 	return build_dbus_response(filtered)
@@ -432,26 +436,21 @@ def parse_rules(config: dict) -> tuple:
 	rules_list = config.get("rules", [])
 	if not isinstance(rules_list, list):
 		return ()
-
 	parsed = []
 	for item in rules_list:
 		if not isinstance(item, dict):
 			continue
-
 		patterns = item.get("patterns")
 		score = item.get("score")
 		if patterns is None or score is None:
 			continue
-
 		if isinstance(patterns, str):
 			patterns = [patterns]
-
 		pat_tuple = tuple(sys.intern(p.strip().lower()) for p in patterns)
 		try:
 			parsed.append((pat_tuple, float(score)))
 		except (ValueError, TypeError):
 			continue
-
 	return tuple(parsed)
 
 
@@ -466,10 +465,8 @@ class Runner(dbus.service.Object):
 			if val is None:
 				found = _find_command(*defaults)
 				return [found] if found else []
-
 			if isinstance(val, list):
 				return val
-
 			return shlex_split(str(val))
 
 		binary_found = _find_command(str(cfg.get("binary") or "plocate"), "locate")
@@ -514,6 +511,14 @@ class Runner(dbus.service.Object):
 		with self._query_lock:
 			return self._current_query_norm != query
 
+	def _hydrated_results(self, raw_candidates: list[tuple[str, float]]) -> list[LightResult]:
+		"""Convierte tuplas (path, score) en LightResult completos (con iconos) solo cuando es necesario."""
+		hydrated = []
+		for path, score in raw_candidates:
+			icon, subtext = get_icon_and_subtext(path)
+			hydrated.append(LightResult(path, icon, score, subtext))
+		return hydrated
+
 	def _run_locate_job(self, norm_query: str, words: tuple[str, ...]) -> None:
 		if self._is_query_stale(norm_query) or not self.binary:
 			return
@@ -525,53 +530,65 @@ class Runner(dbus.service.Object):
 				cmd,
 				stdout=subprocess.PIPE,
 				stderr=subprocess.DEVNULL,
-				bufsize=1,
+				bufsize=IO_CHUNK_SIZE,
 				text=False,
 				start_new_session=True,
 			)
-			processed_results = []
+
+			raw_results: list[tuple[str, float]] = []
 			start_time = time_time()
 			now = time_time()
 			self._last_emitted_count = 0
 			paths_seen = 0
-			for i, line in enumerate(proc.stdout):
-				if i % 10 == 0 and self._is_query_stale(norm_query):
+			total_processed = 0
+
+			while True:
+				chunk_lines = proc.stdout.readlines(IO_CHUNK_SIZE)
+				if not chunk_lines:
+					break
+
+				if self._is_query_stale(norm_query):
 					proc.terminate()
 					return
-
 				if time_time() - start_time > self.process_timeout:
 					proc.terminate()
 					break
 
-				try:
-					raw = line.decode("utf-8", errors="surrogateescape").rstrip("\n")
-					path = os.fsdecode(raw.encode("utf-8", "surrogateescape"))
-				except Exception:
-					continue
+				for line in chunk_lines:
+					try:
+						raw = os.fsdecode(line.rstrip(b"\n"))
+						if "\x00" in raw:
+							continue
+						path = raw
+					except Exception:
+						continue
 
-				paths_seen += 1
+					paths_seen += 1
+					if paths_seen > MAX_TOTAL_RESULTS * 2:
+						break
+
+					if paths_seen > 100 and len(raw_results) >= MAX_PARTIAL_RESULTS:
+						if self.scorer.quick_score(path, words) < 0.3:
+							continue
+
+					path_lower = path.lower()
+					score = self.scorer.calculate(path, path_lower, words, now)
+
+					if score > 0.01:
+						raw_results.append((path, score))
+						total_processed += 1
+
+						# Emitir cada 50 paths procesados para mantener UX fluida
+						if total_processed % 50 == 0 and total_processed <= MAX_PARTIAL_RESULTS and not self._is_query_stale(norm_query):
+							raw_results.sort(key=itemgetter(1), reverse=True)
+							partial_view = raw_results[:MAX_PARTIAL_RESULTS]
+							final_objs = self._hydrated_results(partial_view)
+							self._last_emitted_count = len(final_objs)
+							GLib.idle_add(self.MatchesChanged, norm_query, build_dbus_response(final_objs))
+
 				if paths_seen > MAX_TOTAL_RESULTS * 2:
 					break
 
-				if paths_seen > 100 and len(processed_results) >= MAX_PARTIAL_RESULTS and self.scorer.quick_score(path, words) < 0.3:
-					continue
-
-				path_lower = path.lower()
-				score = self.scorer.calculate(path, path_lower, words, now)
-				if score <= 0.01:
-					continue
-
-				icon, subtext = get_icon_and_subtext(path)
-				processed_results.append(LightResult(path, icon, score, subtext))
-				if (
-					len(processed_results) > self._last_emitted_count
-					and len(processed_results) <= MAX_PARTIAL_RESULTS
-					and len(processed_results) % 50 == 0
-					and not self._is_query_stale(norm_query)
-				):
-					partial = sorted(processed_results, key=attrgetter("score"), reverse=True)
-					self._last_emitted_count = len(partial)
-					GLib.idle_add(self.MatchesChanged, norm_query, build_dbus_response(partial))
 		except (OSError, subprocess.SubprocessError):
 			return
 		except Exception:
@@ -581,15 +598,21 @@ class Runner(dbus.service.Object):
 				with suppress(Exception):
 					if proc.poll() is None:
 						proc.terminate()
-						proc.wait(timeout=0.2)
-
+						try:
+							proc.wait(timeout=1.0)
+						except subprocess.TimeoutExpired:
+							proc.kill()
+							proc.wait()
 					proc.stdout.close()
 
-		processed_results.sort(key=attrgetter("score"), reverse=True)
+		raw_results.sort(key=itemgetter(1), reverse=True)
+		top_raw = raw_results[:MAX_TOTAL_RESULTS]
+		final_results = tuple(self._hydrated_results(top_raw))
+
 		GLib.idle_add(
 			self._on_search_finished,
 			norm_query,
-			tuple(processed_results[:MAX_TOTAL_RESULTS]),
+			final_results,
 		)
 
 	def _on_search_finished(self, query: str, results: tuple[LightResult, ...]) -> bool:
@@ -614,6 +637,8 @@ class Runner(dbus.service.Object):
 		except ValueError:
 			norm = " ".join(w.lower() for w in shlex_split(stripped))
 			words = tuple(norm.split())
+		except Exception:
+			return []
 
 		if norm in self.search_results:
 			self.search_results.move_to_end(norm)
@@ -649,14 +674,19 @@ class Runner(dbus.service.Object):
 
 	@dbus.service.method(IFACE_KRUNNER, in_signature="ss")
 	def Run(self, data: str, action_id: str) -> None:
+		if not data or "\x00" in data:
+			return
+
+		safe_path = os.path.normpath(data)
+
 		if not action_id or action_id == "open":
 			if self.opener:
-				_spawn([*self.opener, data])
+				_spawn([*self.opener, safe_path])
 		elif action_id == "parent":
 			if self.opener:
-				_spawn([*self.opener, os.path.dirname(data)])
+				_spawn([*self.opener, os.path.dirname(safe_path)])
 		elif action_id == "copy":
-			if self.clipboard_cmd and _run_subprocess_input(self.clipboard_cmd, data):
+			if self.clipboard_cmd and _run_subprocess_input(self.clipboard_cmd, safe_path):
 				return
 
 			fallbacks = [
@@ -665,7 +695,7 @@ class Runner(dbus.service.Object):
 				["xsel", "--clipboard", "--input"],
 			]
 			for cmd in fallbacks:
-				if shutil.which(cmd[0]) and _run_subprocess_input(cmd, data):
+				if shutil.which(cmd[0]) and _run_subprocess_input(cmd, safe_path):
 					return
 
 
