@@ -4,170 +4,134 @@
 +------------+
 |  LINDWYRM  |
 +------------+
+
 The Ancient File Hunter
 
-───Overview
+--- Overview ----------------------------------------------------------------
 
-A lightweight, high-performance KRunner plugin that integrates
-locate / plocate to provide fast file searching in KDE Plasma,
-with intelligent scoring, caching, and debounced asynchronous
-execution.
+A lightweight, high-performance KRunner plugin that integrates locate/plocate
+to provide fast file searching in KDE Plasma, with intelligent scoring,
+caching, and debounced asynchronous execution.
 
-───Core Features
+--- Core Features ----------------------------------------------------------
 
-- Uses locate / plocate for instant filesystem-wide search
-- Asynchronous execution to keep KRunner responsive
-- Debouncing to avoid spawning processes on every keystroke
-- LRU query cache with prefix-based reuse
-- Progressive result updates via MatchesChanged
-- Smart cache refinement (avoids truncated result sets)
-- Relevance scoring based on:
+  * Uses locate/plocate for instant filesystem-wide search
+  * Asynchronous execution to keep KRunner responsive
+  * Debouncing to avoid spawning processes on every keystroke
+  * LRU query cache with prefix-based reuse
+  * Progressive result updates via MatchesChanged
+  * Smart cache refinement (avoids truncated result sets)
+  * Relevance scoring based on:
+      * Filename matching with position weighting
+      * Directory depth
+      * Modification time (exponential decay)
+      * Executability
+      * User-defined scoring rules
+  * MIME-aware icons (GIO, optional python-magic)
+  * Actions: Open file | Open parent folder | Copy full path
 
-  • filename matching with position weighting
-  • directory depth
-  • modification time (exponential decay)
-  • executability
-  • user-defined scoring rules
+--- Requirements -----------------------------------------------------------
 
-- MIME-aware icons (GIO, optional python-magic)
+  * Python 3.10+ (3.11+ recommended for native tomllib)
+  * plocate or locate
+  * Python packages:
+      * dbus-python
+      * PyGObject
+      * tomli (for Python 3.10, built-in tomllib for 3.11+)
+      * python-magic (optional, for enhanced MIME detection)
 
-- Actions:
+--- Configuration ----------------------------------------------------------
 
-  • Open file
-  • Open parent folder
-  • Copy full path to clipboard
-
-═══════════════════════════════════════════════════════════════
-
-───Requirements
-
-- Python 3.10+ (3.11+ recommended for native tomllib)
-- plocate or locate
-- Python packages:
-
-  • dbus-python
-  • PyGObject
-  • tomli (for Python 3.10, built-in tomllib for 3.11+)
-  • python-magic (optional, for enhanced MIME detection)
-
-═══════════════════════════════════════════════════════════════
-
-───Configuration
-
-Config file (TOML format):
-
-────────────────────────────────
-~/.config/locate-krunner/config.toml
-────────────────────────────────
+Config file (TOML format): ~/.config/locate-krunner/config.toml
 
 Example:
++------------------------------------------+
+| [settings]                               |
+| binary = "plocate"                       |
+| cache_big = 4096                         |
+| cache_med = 2048                         |
+| debounce_ms = 200                        |
+| depth_penalty = 0.02                     |
+| executable_bonus = 0.1                   |
+| history_size = 500                       |
+| min_len = 3                              |
+| mod_time_half_life_days = 50.0           |
+| mod_time_weight = 0.3                    |
+| process_timeout = 3.0                    |
+| sigmoid_steepness = 5.0                  |
+|                                          |
+| # String or array format supported       |
+| opener = "xdg-open"                      |
+| # opener = ["mimeo", "handlr"]           |
+|                                          |
+| clipboard_cmd = "wl-copy"                |
+| # clipboard_cmd = ["xclip", "-sel", "c"] |
+|                                          |
+| opts = "-i -l 25"                        |
+| # opts = ["-i", "-l", "25"]              |
+|                                          |
+| # Scoring rules (native TOML structure)  |
+| [[rules]]                                |
+| patterns = ["*.mp4", "*.mkv", "*.avi"]   |
+| score = 0.2                              |
+|                                          |
+| [[rules]]                                |
+| patterns = ["*.jpg", "*.png"]            |
+| score = 0.15                             |
+|                                          |
+| [[rules]]                                |
+| patterns = "*/.cache/*"                  |
+| score = -0.4                             |
+|                                          |
+| [[rules]]                                |
+| patterns = "*/node_modules/*"            |
+| score = -1.0                             |
++------------------------------------------+
 
-╭──────────────────────────────────────────╮
-│ [settings]                               │
-│ binary = "plocate"                       │
-│ cache_big = 4096                         │
-│ cache_med = 2048                         │
-│ debounce_ms = 200                        │
-│ depth_penalty = 0.02                     │
-│ executable_bonus = 0.1                   │
-│ history_size = 500                       │
-│ min_len = 3                              │
-│ mod_time_half_life_days = 50.0           │
-│ mod_time_weight = 0.3                    │
-│ process_timeout = 3.0                    │
-│ sigmoid_steepness = 5.0                  │
-│                                          │
-│ # String or array format supported       │
-│ opener = "xdg-open"                      │
-│ # opener = ["mimeo", "handlr"]           │
-│                                          │
-│ clipboard_cmd = "wl-copy"                │
-│ # clipboard_cmd = ["xclip", "-sel", "c"] │
-│                                          │
-│ opts = "-i -l 25"                        │
-│ # opts = ["-i", "-l", "25"]              │
-│                                          │
-│ # Scoring rules (native TOML structure)  │
-│ [[rules]]                                │
-│ patterns = ["*.mp4", "*.mkv", "*.avi"]   │
-│ score = 0.2                              │
-│                                          │
-│ [[rules]]                                │
-│ patterns = ["*.jpg", "*.png"]            │
-│ score = 0.15                             │
-│                                          │
-│ [[rules]]                                │
-│ patterns = "*/.cache/*"                  │
-│ score = -0.4                             │
-│                                          │
-│ [[rules]]                                │
-│ patterns = "*/node_modules/*"            │
-│ score = -1.0                             │
-╰──────────────────────────────────────────╯
+--- Configuration Notes ----------------------------------------------------
 
-───Configuration Notes
+  * binary: Path to locate binary (auto-detects plocate/locate)
+  * opts: Command-line options (auto-adds -l 25 if missing)
+  * opener: File opener command (auto-detects mimeo/handlr/xdg-open)
+  * clipboard_cmd: Clipboard command (auto-detects wl-copy/xclip/xsel)
+  * rules: Native TOML array of tables (cleaner than INI)
+      * patterns can be a string or array of strings
+      * score is a float (positive = boost, negative = penalty)
+  * mod_time_half_life_days: Files this old have 50% of max time bonus
+  * All numeric configs have safe defaults if missing
 
-- binary: Path to locate binary (auto-detects plocate/locate)
-- opts: Command-line options (auto-adds -l 25 if missing)
-- opener: File opener command (auto-detects mimeo/handlr/xdg-open)
-- clipboard_cmd: Clipboard command (auto-detects wl-copy/xclip/xsel)
-- rules: Native TOML array of tables (cleaner than INI)
-  - patterns can be a string or array of strings
-  - score is a float (positive = boost, negative = penalty)
-- mod_time_half_life_days: Files this old have 50% of max time bonus
-- All numeric configs have safe defaults if missing
+--- How It Works ----------------------------------------------------------
 
-═══════════════════════════════════════════════════════════════
+  1. User types a query in KRunner
+  2. Query is normalized and debounced (200ms default)
+  3. Cached results returned immediately if available
+  4. Smart cache: only reuses if result set wasn't truncated
+  5. locate runs asynchronously after debounce
+  6. Results are scored and sorted incrementally
+  7. Partial results emitted every 50 items via MatchesChanged
+  8. Final results cached (FIFO eviction at 500 queries)
+  9. Old searches canceled cooperatively
 
-───How It Works (High Level)
-
- 1. User types a query in KRunner
- 2. Query is normalized and debounced (200ms default)
- 3. Cached results returned immediately if available
- 4. Smart cache: only reuses if result set wasn't truncated
- 5. locate runs asynchronously after debounce
- 6. Results are scored and sorted incrementally
- 7. Partial results emitted every 50 items via MatchesChanged
- 8. Final results cached (FIFO eviction at 500 queries)
- 9. Old searches canceled cooperatively every 10 iterations
-
-═══════════════════════════════════════════════════════════════
-
-───DBus Interface
+--- DBus Interface ---------------------------------------------------------
 
 Implements org.kde.krunner1:
+  * Match(query) > results
+  * Actions() > open / parent / copy
+  * Run(data, action_id)
+  * MatchesChanged(query, results) for progressive updates
 
-- Match(query) → results
-- Actions() → open / parent / copy
-- Run(data, action_id)
-- MatchesChanged(query, results) for progressive updates
+--- Performance Notes -----------------------------------------------------
 
-═══════════════════════════════════════════════════════════════
+  * Single worker thread prevents CPU saturation
+  * Cached filesystem metadata avoids repeated stat() calls
+  * Prefix-based cache reuse with truncation detection
+  * Memory-bounded cache (max 500 queries, ~25MB)
+  * Streaming processing for first results <100ms
+  * Quick-score pre-filter after 100 paths (60% CPU reduction)
+  * Maximum 1000 paths processed per search (timeout protection)
+  * Lazy hydration: icons/metadata computed only for top results
 
-───Performance Notes
-
-- Single worker thread prevents CPU saturation
-- Cached filesystem metadata avoids repeated stat() calls
-- Prefix-based cache reuse with truncation detection
-- Memory-bounded cache (max 500 queries, ~25MB)
-- Streaming processing (not bulk read) for first results <100ms
-- Quick-score pre-filter after 100 paths (60% CPU reduction)
-- Maximum 1000 paths processed per search (timeout protection)
-- Lazy hydration: icons/metadata computed only for top results
-
-═══════════════════════════════════════════════════════════════
-
-───Migration from INI
-
-If migrating from config.ini to config.toml:
-
-- Rename scoring_rule_N entries to [[rules]] array
-- Quote string values: binary = plocate → binary = "plocate"
-- Numbers can be unquoted: min_len = "3" → min_len = 3
-- Arrays use native syntax: opts = ["-i", "-l", "25"]
-- Move [Settings] → [settings] (lowercase)
-
-See config.toml.example for full annotated configuration.
+----------------------------------------------------------------------------
 """
 
 import math
@@ -186,7 +150,7 @@ from operator import itemgetter
 from shlex import split as shlex_split
 from threading import Lock as threading_Lock
 from time import time as time_time
-from typing import NamedTuple, Any
+from typing import Any, NamedTuple
 
 try:
 	import tomllib
@@ -195,7 +159,7 @@ except ModuleNotFoundError:
 
 import dbus.service
 from dbus.mainloop.glib import DBusGMainLoop
-from gi.repository import Gio, GLib  # type: ignore
+from gi.repository import Gio, GLib  # type: ignore[missing-module-attribute]
 
 MAX_TOTAL_RESULTS = 500
 MAX_PARTIAL_RESULTS = 200
@@ -211,11 +175,10 @@ def read_config(path: str) -> dict[str, Any]:
 	try:
 		with open(path, "rb") as f:
 			data = tomllib.load(f)
+	except (FileNotFoundError, PermissionError, tomllib.TOMLDecodeError, OSError, ValueError):
+		return {}
+	else:
 		return data.get("settings", data)
-	except (FileNotFoundError, PermissionError):
-		return {}
-	except Exception:
-		return {}
 
 
 CONFIG_DIR = GLib.get_user_config_dir()
@@ -223,6 +186,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "locate-krunner", "config.toml")
 _GLOBAL_CFG = read_config(CONFIG_FILE)
 CACHE_BIG = int(_GLOBAL_CFG.get("cache_big", 4096))
 CACHE_MED = int(_GLOBAL_CFG.get("cache_med", 2048))
+
 try:
 	from magic import from_file as magic_from_file
 
@@ -256,6 +220,7 @@ def _find_command(*candidates: str) -> str | None:
 	for cmd in candidates:
 		if found := shutil.which(cmd):
 			return found
+
 	return None
 
 
@@ -268,9 +233,7 @@ def _run_subprocess_input(cmd: list[str], text_input: str) -> bool:
 			capture_output=True,
 			timeout=2,
 		)
-	except (subprocess.SubprocessError, OSError):
-		return False
-	except subprocess.TimeoutExpired:
+	except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError, UnicodeEncodeError):
 		return False
 	else:
 		return True
@@ -280,22 +243,21 @@ def _run_subprocess_input(cmd: list[str], text_input: str) -> bool:
 def cached_path_metadata(path: str) -> tuple[bool, float | None, int, int]:
 	try:
 		stat_info = os.stat(path, follow_symlinks=False)
-	except (OSError, FileNotFoundError):
+	except (FileNotFoundError, PermissionError, OSError, ValueError):
 		return False, None, 0, 0
-	except PermissionError:
-		return False, None, 0, 0
-	is_dir = (stat_info.st_mode & 0o170000) == 0o040000
-	return is_dir, stat_info.st_mtime, stat_info.st_size, stat_info.st_mode
+	else:
+		is_dir = (stat_info.st_mode & 0o170000) == 0o040000
+		return is_dir, stat_info.st_mtime, stat_info.st_size, stat_info.st_mode
 
 
 @lru_cache(maxsize=CACHE_BIG)
 def cached_magic_mime(path: str) -> tuple[str, str]:
 	try:
 		mime_type = magic_from_file(path, mime=True)
-		return intern_pair(mime_type.replace("/", "-"), mime_type.split("/")[-1].upper())
-	except (OSError, ValueError, TypeError):
-		return intern_pair(ICON_UNKNOWN, TYPE_FILE)
-	except PermissionError:
+		icon_name = mime_type.replace("/", "-")
+		subtext = mime_type.split("/")[-1].upper()
+		return intern_pair(icon_name, subtext)
+	except (PermissionError, OSError, FileNotFoundError, ValueError, TypeError, AttributeError):
 		return intern_pair(ICON_UNKNOWN, TYPE_FILE)
 
 
@@ -312,9 +274,7 @@ def get_icon_for_extension(filename: str) -> tuple[str, str]:
 		icon_name = icon_theme.get_names()[0] if (icon_theme and icon_theme.get_names()) else ICON_UNKNOWN
 		subtext = guessed_type.split("/")[-1].upper()
 		return intern_pair(icon_name, subtext)
-	except (TypeError, AttributeError, ValueError):
-		return intern_pair(ICON_UNKNOWN, TYPE_FILE)
-	except Exception:
+	except (TypeError, AttributeError, ValueError, IndexError):
 		return intern_pair(ICON_UNKNOWN, TYPE_FILE)
 
 
@@ -323,10 +283,12 @@ def get_icon_and_subtext(path: str) -> tuple[str, str]:
 	is_dir, _, _, _ = cached_path_metadata(path)
 	if is_dir:
 		return intern_pair("folder", TYPE_FOLDER)
+
 	basename = os.path.basename(path)
 	icon, subtext = get_icon_for_extension(basename)
 	if subtext == TYPE_OCTET and MAGICMIME:
 		return cached_magic_mime(path)
+
 	return icon, subtext
 
 
@@ -354,14 +316,17 @@ class RelevanceScorer:
 				for p in patterns:
 					if fnmatch(path_lower, p):
 						score += action
+
 		score -= path.count(os.sep) * self.depth_penalty
 		return score
 
 	def _modification_bonus(self, mtime: float | None, now: float) -> float:
 		if not mtime:
 			return 0.0
+
 		if mtime > now:
 			return 0.0
+
 		age = max(0.0, now - mtime)
 		return self.mod_time_weight * math.exp(-age / self.mod_time_half_life)
 
@@ -388,6 +353,7 @@ class RelevanceScorer:
 		if not is_dir:
 			if mode & 0o111:
 				score += self.exec_bonus
+
 			score += self._modification_bonus(mtime, now)
 
 		bounded_score = max(-20.0, min(20.0, score))
@@ -402,6 +368,7 @@ class RelevanceScorer:
 		score = sum(1.0 for w in words if w in basename)
 		if not score:
 			return 0.0
+
 		score -= path.count(os.sep) * 0.01
 		return max(0.0, score)
 
@@ -422,6 +389,7 @@ def _compile_filter_regex(words: tuple[str, ...]) -> re.Pattern | None:
 def filter_existing_results(results: tuple[LightResult, ...], words: tuple[str, ...]) -> list:
 	if not words:
 		return build_dbus_response(list(results))
+
 	regex = _compile_filter_regex(words)
 	filtered = [r for r in results if regex.search(r.path)] if regex else [r for r in results if all(w in r.path.lower() for w in words)]
 	return build_dbus_response(filtered)
@@ -436,24 +404,30 @@ def parse_rules(config: dict) -> tuple:
 	rules_list = config.get("rules", [])
 	if not isinstance(rules_list, list):
 		return ()
+
 	parsed = []
 	for item in rules_list:
 		if not isinstance(item, dict):
 			continue
+
 		patterns = item.get("patterns")
 		score = item.get("score")
 		if patterns is None or score is None:
 			continue
+
 		if isinstance(patterns, str):
 			patterns = [patterns]
+
 		pat_tuple = tuple(sys.intern(p.strip().lower()) for p in patterns)
 		try:
 			parsed.append((pat_tuple, float(score)))
 		except (ValueError, TypeError):
 			continue
+
 	return tuple(parsed)
 
 
+# ruff: disable[N802]
 class Runner(dbus.service.Object):
 	def __init__(self) -> None:
 		bus_name = dbus.service.BusName("org.kde.locate", dbus.SessionBus())
@@ -465,17 +439,14 @@ class Runner(dbus.service.Object):
 			if val is None:
 				found = _find_command(*defaults)
 				return [found] if found else []
+
 			if isinstance(val, list):
 				return val
+
 			return shlex_split(str(val))
 
 		binary_found = _find_command(str(cfg.get("binary") or "plocate"), "locate")
-		if not binary_found:
-			print("Error: No se encontro 'plocate' ni 'locate'. El servicio no funcionara.", file=sys.stderr)
-			self.binary = ""
-		else:
-			self.binary = binary_found
-
+		self.binary = binary_found or ""
 		opts_val = cfg.get("opts", "-i -l 25")
 		opts_list = shlex_split(str(opts_val)) if not isinstance(opts_val, list) else opts_val
 		if "-l" not in opts_list and "--limit" not in opts_list:
@@ -512,11 +483,11 @@ class Runner(dbus.service.Object):
 			return self._current_query_norm != query
 
 	def _hydrated_results(self, raw_candidates: list[tuple[str, float]]) -> list[LightResult]:
-		"""Convierte tuplas (path, score) en LightResult completos (con iconos) solo cuando es necesario."""
 		hydrated = []
 		for path, score in raw_candidates:
 			icon, subtext = get_icon_and_subtext(path)
 			hydrated.append(LightResult(path, icon, score, subtext))
+
 		return hydrated
 
 	def _run_locate_job(self, norm_query: str, words: tuple[str, ...]) -> None:
@@ -534,14 +505,12 @@ class Runner(dbus.service.Object):
 				text=False,
 				start_new_session=True,
 			)
-
 			raw_results: list[tuple[str, float]] = []
 			start_time = time_time()
 			now = time_time()
 			self._last_emitted_count = 0
 			paths_seen = 0
 			total_processed = 0
-
 			while True:
 				chunk_lines = proc.stdout.readlines(IO_CHUNK_SIZE)
 				if not chunk_lines:
@@ -550,6 +519,7 @@ class Runner(dbus.service.Object):
 				if self._is_query_stale(norm_query):
 					proc.terminate()
 					return
+
 				if time_time() - start_time > self.process_timeout:
 					proc.terminate()
 					break
@@ -559,26 +529,23 @@ class Runner(dbus.service.Object):
 						raw = os.fsdecode(line.rstrip(b"\n"))
 						if "\x00" in raw:
 							continue
+
 						path = raw
-					except Exception:
+					except (UnicodeDecodeError, ValueError):
 						continue
 
 					paths_seen += 1
 					if paths_seen > MAX_TOTAL_RESULTS * 2:
 						break
 
-					if paths_seen > 100 and len(raw_results) >= MAX_PARTIAL_RESULTS:
-						if self.scorer.quick_score(path, words) < 0.3:
-							continue
+					if paths_seen > 100 and len(raw_results) >= MAX_PARTIAL_RESULTS and self.scorer.quick_score(path, words) < 0.3:
+						continue
 
 					path_lower = path.lower()
 					score = self.scorer.calculate(path, path_lower, words, now)
-
 					if score > 0.01:
 						raw_results.append((path, score))
 						total_processed += 1
-
-						# Emitir cada 50 paths procesados para mantener UX fluida
 						if total_processed % 50 == 0 and total_processed <= MAX_PARTIAL_RESULTS and not self._is_query_stale(norm_query):
 							raw_results.sort(key=itemgetter(1), reverse=True)
 							partial_view = raw_results[:MAX_PARTIAL_RESULTS]
@@ -588,10 +555,7 @@ class Runner(dbus.service.Object):
 
 				if paths_seen > MAX_TOTAL_RESULTS * 2:
 					break
-
-		except (OSError, subprocess.SubprocessError):
-			return
-		except Exception:
+		except (OSError, subprocess.SubprocessError, ValueError, UnicodeError):
 			return
 		finally:
 			if proc:
@@ -603,12 +567,12 @@ class Runner(dbus.service.Object):
 						except subprocess.TimeoutExpired:
 							proc.kill()
 							proc.wait()
+
 					proc.stdout.close()
 
 		raw_results.sort(key=itemgetter(1), reverse=True)
 		top_raw = raw_results[:MAX_TOTAL_RESULTS]
 		final_results = tuple(self._hydrated_results(top_raw))
-
 		GLib.idle_add(
 			self._on_search_finished,
 			norm_query,
@@ -627,22 +591,20 @@ class Runner(dbus.service.Object):
 		return False
 
 	@dbus.service.method(IFACE_KRUNNER, in_signature="s", out_signature="a(sssida{sv})")
-	def Match(self, query: str):
+	def Match(self, query: str):  # noqa: ANN201
 		stripped = query.strip()
 		if len(stripped) < self.min_len:
 			return []
 
 		try:
 			norm, words = normalize_and_parse(stripped)
-		except ValueError:
+		except (ValueError, UnicodeDecodeError, UnicodeEncodeError, AttributeError):
 			norm = " ".join(w.lower() for w in shlex_split(stripped))
 			words = tuple(norm.split())
-		except Exception:
-			return []
 
 		if norm in self.search_results:
 			self.search_results.move_to_end(norm)
-			return build_dbus_response(self.search_results[norm])
+			return build_dbus_response(list(self.search_results[norm]))
 
 		if self._debounce_timer:
 			GLib.source_remove(self._debounce_timer)
@@ -665,7 +627,7 @@ class Runner(dbus.service.Object):
 		return False
 
 	@dbus.service.method(IFACE_KRUNNER, out_signature="a(sss)")
-	def Actions(self):
+	def Actions(self):  # noqa: ANN201
 		return [
 			("open", "Open File", "document-open"),
 			("parent", "Open Parent Folder", "inode-directory"),
@@ -678,7 +640,6 @@ class Runner(dbus.service.Object):
 			return
 
 		safe_path = os.path.normpath(data)
-
 		if not action_id or action_id == "open":
 			if self.opener:
 				_spawn([*self.opener, safe_path])
