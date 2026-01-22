@@ -178,7 +178,10 @@ def read_config(path: str) -> dict[str, Any]:
 	except (FileNotFoundError, PermissionError, tomllib.TOMLDecodeError, OSError, ValueError):
 		return {}
 	else:
-		return data.get("settings", data)
+		settings = data.get("settings", {})
+		if isinstance(settings, dict):
+			data.update(settings)
+		return data
 
 
 CONFIG_DIR = GLib.get_user_config_dir()
@@ -456,7 +459,7 @@ class Runner(dbus.service.Object):
 		self.opener = _get_list_from_cfg("opener", ["mimeo", "handlr", "xdg-open"])
 		self.clipboard_cmd = _get_list_from_cfg("clipboard_cmd", [])
 		self.min_len = max(1, int(cfg.get("min_len", 3)))
-		self.debounce_ms = int(cfg.get("debounce_ms", 200))
+		self.debounce_ms = int(cfg.get("debounce_ms", 300))
 		self.process_timeout = float(cfg.get("process_timeout", 3.0))
 		self.max_cached_queries = int(cfg.get("history_size", 500))
 		self.scorer = RelevanceScorer(
