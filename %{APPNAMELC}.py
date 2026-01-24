@@ -134,22 +134,22 @@ Implements org.kde.krunner1:
 ----------------------------------------------------------------------------
 """
 
-import math
 import os
 import re
-import shutil
-import signal
 import subprocess
-import sys
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from fnmatch import fnmatch
 from functools import lru_cache
+from math import exp, log1p, sqrt
 from operator import itemgetter
 from shlex import split as shlex_split
-from threading import Lock as threading_Lock
-from time import time as time_time
+from shutil import which
+from signal import SIG_DFL, SIGINT, signal
+from sys import intern
+from threading import Lock
+from time import time
 from typing import Any, NamedTuple
 
 try:
@@ -164,10 +164,10 @@ from gi.repository import Gio, GLib  # type: ignore[missing-module-attribute]
 MAX_TOTAL_RESULTS = 500
 MAX_PARTIAL_RESULTS = 200
 IFACE_KRUNNER = "org.kde.krunner1"
-ICON_UNKNOWN = sys.intern("unknown")
-TYPE_FILE = sys.intern("FILE")
-TYPE_FOLDER = sys.intern("FOLDER")
-TYPE_OCTET = sys.intern("OCTET-STREAM")
+ICON_UNKNOWN = intern("unknown")
+TYPE_FILE = intern("FILE")
+TYPE_FOLDER = intern("FOLDER")
+TYPE_OCTET = intern("OCTET-STREAM")
 IO_CHUNK_SIZE = 65536
 
 
@@ -206,7 +206,7 @@ class LightResult(NamedTuple):
 
 
 def intern_pair(a: str, b: str) -> tuple[str, str]:
-	return sys.intern(a), sys.intern(b)
+	return intern(a), intern(b)
 
 
 def _spawn(cmd: list[str]) -> None:
@@ -221,7 +221,7 @@ def _spawn(cmd: list[str]) -> None:
 
 def _find_command(*candidates: str) -> str | None:
 	for cmd in candidates:
-		if found := shutil.which(cmd):
+		if found := which(cmd):
 			return found
 
 	return None
@@ -296,6 +296,39 @@ def get_icon_and_subtext(path: str) -> tuple[str, str]:
 
 
 class RelevanceScorer:
+	"""
+	RELEVANCE SCORING SYSTEM (SCORING ENGINE)
+	========================================
+
+	This system computes the relevance of a file based on multiple heuristic
+	dimensions, transforming a raw score into a relevance probability between
+	0.0 and 1.0 using an Algebraic Sigmoid (Softsign) function.
+
+	1. RAW SCORE COMPONENTS (S):
+	-----------------------------
+		S = S_static + S_matching + S_mod + S_bonus - S_penalty
+
+		* STATIC (S_static):  Points assigned by '[[rules]]' entries in config.toml.
+		* MATCHING (S_matching): Based on word position and length.
+		* RECENCY (S_mod): Exponential decay based on file age.
+		* PENALTY: -0.02 for each additional directory level.
+
+	2. ACTIVATION FUNCTION (ALGEBRAIC SIGMOID):
+	-------------------------------------------
+	Used to normalize the raw score without the aggressive saturation of the
+	standard logistic sigmoid. This preserves ranking differences between
+	high-scoring items (e.g., distinguishing 10.0 from 20.0).
+
+		Formula: P(s) = 0.5 * (1 + (x / sqrt(1 + x^2)))
+		Where x = raw_score / sigmoid_steepness
+
+	3. KEY VARIABLES:
+	------------------
+		- sigmoid_steepness: Acts as a smoothing factor (k).
+		  Higher values make the curve flatter, requiring higher scores
+		  to reach 1.0. (Default 5.0 works well as a divisor here).
+	"""
+
 	def __init__(
 		self,
 		rules: tuple,
@@ -331,7 +364,7 @@ class RelevanceScorer:
 			return 0.0
 
 		age = max(0.0, now - mtime)
-		return self.mod_time_weight * math.exp(-age / self.mod_time_half_life)
+		return self.mod_time_weight * exp(-age / self.mod_time_half_life)
 
 	def calculate(self, path: str, path_lower: str, words: tuple[str, ...], now: float) -> float:
 		is_dir, mtime, size, mode = cached_path_metadata(path)
@@ -342,8 +375,8 @@ class RelevanceScorer:
 		name_lower = os.path.basename(path_lower)
 		name_len = max(1, len(name_lower))
 		matches = [
-			math.pow(
-				math.exp(-2.5 * name_lower.find(w) / name_len) * math.pow(len(w) / name_len, 0.7),
+			pow(
+				exp(-2.5 * name_lower.find(w) / name_len) * pow(len(w) / name_len, 0.7),
 				1.2,
 			)
 			* 2.0
@@ -351,7 +384,7 @@ class RelevanceScorer:
 			if w in name_lower
 		]
 		if matches:
-			score += max(matches) + math.log1p(len(matches)) * 0.20
+			score += max(matches) + log1p(len(matches)) * 0.20
 
 		if not is_dir:
 			if mode & 0o111:
@@ -359,11 +392,12 @@ class RelevanceScorer:
 
 			score += self._modification_bonus(mtime, now)
 
-		bounded_score = max(-20.0, min(20.0, score))
-		try:
-			return 1.0 / (1.0 + math.exp(-bounded_score * self.sigmoid_steepness))
-		except OverflowError:
-			return 1.0 if bounded_score > 0 else 0.0
+		# Option 2: Algebraic Sigmoid (Softsign)
+		# Uses self.sigmoid_steepness as a sensitivity divisor (k).
+		# This prevents hard saturation at 1.0 for high scores.
+		k = self.sigmoid_steepness if self.sigmoid_steepness > 0.1 else 5.0
+		x = score / k
+		return 0.5 * (1.0 + (x / sqrt(1.0 + x * x)))
 
 	def quick_score(self, path: str, words: tuple[str, ...]) -> float:
 		path_lower = path.lower()
@@ -377,7 +411,7 @@ class RelevanceScorer:
 
 
 def build_dbus_response(results: list[LightResult]) -> list:
-	return [(r.path, r.path, r.icon, 100, max(0.0, min(1.0, r.score)), {"subtext": r.subtext}) for r in results[:MAX_TOTAL_RESULTS]]
+	return [(r.path, os.path.basename(r.path), r.icon, 100, max(0.0, min(1.0, r.score)), {"subtext": r.subtext}) for r in results[:MAX_TOTAL_RESULTS]]
 
 
 @lru_cache(maxsize=CACHE_MED)
@@ -421,7 +455,7 @@ def parse_rules(config: dict) -> tuple:
 		if isinstance(patterns, str):
 			patterns = [patterns]
 
-		pat_tuple = tuple(sys.intern(p.strip().lower()) for p in patterns)
+		pat_tuple = tuple(intern(p.strip().lower()) for p in patterns)
 		try:
 			parsed.append((pat_tuple, float(score)))
 		except (ValueError, TypeError):
@@ -472,7 +506,7 @@ class Runner(dbus.service.Object):
 		)
 		self.search_results = OrderedDict()
 		self._current_query_norm: str | None = None
-		self._query_lock = threading_Lock()
+		self._query_lock = Lock()
 		self.executor = ThreadPoolExecutor(max_workers=1)
 		self._debounce_timer = None
 		self._last_emitted_count = 0
@@ -509,8 +543,8 @@ class Runner(dbus.service.Object):
 				start_new_session=True,
 			)
 			raw_results: list[tuple[str, float]] = []
-			start_time = time_time()
-			now = time_time()
+			start_time = time()
+			now = time()
 			self._last_emitted_count = 0
 			paths_seen = 0
 			total_processed = 0
@@ -523,7 +557,7 @@ class Runner(dbus.service.Object):
 					proc.terminate()
 					return
 
-				if time_time() - start_time > self.process_timeout:
+				if time() - start_time > self.process_timeout:
 					proc.terminate()
 					break
 
@@ -659,13 +693,13 @@ class Runner(dbus.service.Object):
 				["xsel", "--clipboard", "--input"],
 			]
 			for cmd in fallbacks:
-				if shutil.which(cmd[0]) and _run_subprocess_input(cmd, safe_path):
+				if which(cmd[0]) and _run_subprocess_input(cmd, safe_path):
 					return
 
 
 if __name__ == "__main__":
 	DBusGMainLoop(set_as_default=True)
-	signal.signal(signal.SIGINT, signal.SIG_DFL)
+	signal(SIGINT, SIG_DFL)
 	Runner()
 	loop = GLib.MainLoop()
 	with suppress(KeyboardInterrupt):
