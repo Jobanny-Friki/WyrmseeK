@@ -142,7 +142,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from fnmatch import fnmatch
 from functools import lru_cache
-from math import exp, log1p, sqrt
+from math import exp, log1p
 from operator import itemgetter
 from shlex import split as shlex_split
 from shutil import which
@@ -181,6 +181,7 @@ def read_config(path: str) -> dict[str, Any]:
 		settings = data.get("settings", {})
 		if isinstance(settings, dict):
 			data.update(settings)
+
 		return data
 
 
@@ -296,122 +297,106 @@ def get_icon_and_subtext(path: str) -> tuple[str, str]:
 
 
 class RelevanceScorer:
-	"""
-	RELEVANCE SCORING SYSTEM (SCORING ENGINE)
-	========================================
+	__slots__ = (
+		"depth_penalty",
+		"exec_bonus",
+		"mod_time_half_life",
+		"mod_time_weight",
+		"rules",
+		"sigmoid_steepness",
+	)
 
-	This system computes the relevance of a file based on multiple heuristic
-	dimensions, transforming a raw score into a relevance probability between
-	0.0 and 1.0 using an Algebraic Sigmoid (Softsign) function.
-
-	1. RAW SCORE COMPONENTS (S):
-	-----------------------------
-		S = S_static + S_matching + S_mod + S_bonus - S_penalty
-
-		* STATIC (S_static):  Points assigned by '[[rules]]' entries in config.toml.
-		* MATCHING (S_matching): Based on word position and length.
-		* RECENCY (S_mod): Exponential decay based on file age.
-		* PENALTY: -0.02 for each additional directory level.
-
-	2. ACTIVATION FUNCTION (ALGEBRAIC SIGMOID):
-	-------------------------------------------
-	Used to normalize the raw score without the aggressive saturation of the
-	standard logistic sigmoid. This preserves ranking differences between
-	high-scoring items (e.g., distinguishing 10.0 from 20.0).
-
-		Formula: P(s) = 0.5 * (1 + (x / sqrt(1 + x^2)))
-		Where x = raw_score / sigmoid_steepness
-
-	3. KEY VARIABLES:
-	------------------
-		- sigmoid_steepness: Acts as a smoothing factor (k).
-		  Higher values make the curve flatter, requiring higher scores
-		  to reach 1.0. (Default 5.0 works well as a divisor here).
-	"""
+	MAX_DEPTH = 12
+	CHEAP_DEPTH_PENALTY = 0.02
+	CHEAP_MATCH_THRESHOLD = 1.0
+	MATCH_SATURATION = 1.6
 
 	def __init__(
-		self,
-		rules: tuple,
-		half_life_days: float,
-		mod_time_weight: float,
-		depth_penalty: float,
-		exec_bonus: float,
-		sigmoid_steepness: float,
+		self, depth_penalty: float, exec_bonus: float, half_life_days: float, mod_time_weight: float, rules: tuple, sigmoid_steepness: float
 	) -> None:
-		self.rules = rules
-		self.mod_time_half_life = max(1.0, half_life_days) * 86400.0
-		self.mod_time_weight = mod_time_weight
 		self.depth_penalty = depth_penalty
 		self.exec_bonus = exec_bonus
+		self.mod_time_half_life = max(1.0, half_life_days) * 86400.0
+		self.mod_time_weight = mod_time_weight
+		self.rules = rules
 		self.sigmoid_steepness = sigmoid_steepness
 
-	def _get_static_score(self, path: str, path_lower: str) -> float:
+	def quick_score(self, path: str, words: tuple[str, ...]) -> float:
+		path_lower = path.lower()
+		basename = os.path.basename(path_lower)
+
 		score = 0.0
-		if self.rules:
-			for patterns, action in self.rules:
-				for p in patterns:
-					if fnmatch(path_lower, p):
-						score += action
+		for w in words:
+			if w in basename:
+				score += 1.0
 
-		score -= path.count(os.sep) * self.depth_penalty
-		return score
-
-	def _modification_bonus(self, mtime: float | None, now: float) -> float:
-		if not mtime:
+		if not score:
 			return 0.0
 
-		if mtime > now:
-			return 0.0
-
-		age = max(0.0, now - mtime)
-		return self.mod_time_weight * exp(-age / self.mod_time_half_life)
+		depth = min(path.count(os.sep), self.MAX_DEPTH)
+		score -= depth * self.CHEAP_DEPTH_PENALTY
+		return max(0.0, score)
 
 	def calculate(self, path: str, path_lower: str, words: tuple[str, ...], now: float) -> float:
 		is_dir, mtime, size, mode = cached_path_metadata(path)
+
 		if not is_dir and size == 0:
 			return 0.0
 
-		score = self._get_static_score(path, path_lower)
-		name_lower = os.path.basename(path_lower)
-		name_len = max(1, len(name_lower))
-		matches = [
-			pow(
-				exp(-2.5 * name_lower.find(w) / name_len) * pow(len(w) / name_len, 0.7),
-				1.2,
-			)
-			* 2.0
-			for w in words
-			if w in name_lower
-		]
-		if matches:
-			score += max(matches) + log1p(len(matches)) * 0.20
+		score = 0.0
+
+		# --- static score (rules + depth) ---
+		if self.rules:
+			for patterns, delta in self.rules:
+				for p in patterns:
+					if fnmatch(path_lower, p):
+						score += delta
+
+		depth = min(path.count(os.sep), self.MAX_DEPTH)
+		score -= depth * self.depth_penalty
+
+		basename = os.path.basename(path_lower)
+		name_len = max(1, len(basename))
+
+		best_match = 0.0
+		match_count = 0
+
+		for w in words:
+			pos = basename.find(w)
+			if pos == -1:
+				continue
+
+			match_count += 1
+			weight = (exp(-2.5 * pos / name_len) * pow(len(w) / name_len, 0.7)) ** 1.2 * 2.0
+
+			if weight > best_match:
+				best_match = weight
+				if best_match >= self.MATCH_SATURATION:
+					break
+
+		if best_match:
+			score += best_match
+			if match_count > 1:
+				score += log1p(match_count) * 0.20
 
 		if not is_dir:
 			if mode & 0o111:
 				score += self.exec_bonus
 
-			score += self._modification_bonus(mtime, now)
+			if mtime and mtime <= now:
+				age = now - mtime
+				if age >= 0:
+					score += self.mod_time_weight * exp(-age / self.mod_time_half_life)
 
-		# Option 2: Algebraic Sigmoid (Softsign)
-		# Uses self.sigmoid_steepness as a sensitivity divisor (k).
-		# This prevents hard saturation at 1.0 for high scores.
-		k = self.sigmoid_steepness if self.sigmoid_steepness > 0.1 else 5.0
-		x = score / k
-		return 0.5 * (1.0 + (x / sqrt(1.0 + x * x)))
-
-	def quick_score(self, path: str, words: tuple[str, ...]) -> float:
-		path_lower = path.lower()
-		basename = os.path.basename(path_lower)
-		score = sum(1.0 for w in words if w in basename)
-		if not score:
-			return 0.0
-
-		score -= path.count(os.sep) * 0.01
-		return max(0.0, score)
+		bounded = max(-20.0, min(20.0, score))
+		try:
+			return 1.0 / (1.0 + exp(-bounded * self.sigmoid_steepness))
+		except OverflowError:
+			return 1.0 if bounded > 0 else 0.0
 
 
 def build_dbus_response(results: list[LightResult]) -> list:
-	return [(r.path, os.path.basename(r.path), r.icon, 100, max(0.0, min(1.0, r.score)), {"subtext": r.subtext}) for r in results[:MAX_TOTAL_RESULTS]]
+	return [(r.path, os.path.basename(r.path), r.icon, 100, r.score, {"subtext": r.subtext}) for r in results[:MAX_TOTAL_RESULTS]]
 
 
 @lru_cache(maxsize=CACHE_MED)
