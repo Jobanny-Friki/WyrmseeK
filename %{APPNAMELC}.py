@@ -88,18 +88,6 @@ Example:
 | score = -1.0                             |
 +------------------------------------------+
 
---- Configuration Notes ----------------------------------------------------
-
-  * binary: Path to locate binary (auto-detects plocate/locate)
-  * opts: Command-line options (auto-adds -l 25 if missing)
-  * opener: File opener command (auto-detects mimeo/handlr/xdg-open)
-  * clipboard_cmd: Clipboard command (auto-detects wl-copy/xclip/xsel)
-  * rules: Native TOML array of tables (cleaner than INI)
-      * patterns can be a string or array of strings
-      * score is a float (positive = boost, negative = penalty)
-  * mod_time_half_life_days: Files this old have 50% of max time bonus
-  * All numeric configs have safe defaults if missing
-
 --- How It Works ----------------------------------------------------------
 
   1. User types a query in KRunner
@@ -111,14 +99,6 @@ Example:
   7. Partial results emitted every 50 items via MatchesChanged
   8. Final results cached (FIFO eviction at 500 queries)
   9. Old searches canceled cooperatively
-
---- DBus Interface ---------------------------------------------------------
-
-Implements org.kde.krunner1:
-  * Match(query) > results
-  * Actions() > open / parent / copy
-  * Run(data, action_id)
-  * MatchesChanged(query, results) for progressive updates
 
 --- Performance Notes -----------------------------------------------------
 
@@ -142,7 +122,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from fnmatch import fnmatch
 from functools import lru_cache
-from math import exp, log1p
+from math import exp, log1p, tanh
 from operator import itemgetter
 from shlex import split as shlex_split
 from shutil import which
@@ -296,8 +276,27 @@ def get_icon_and_subtext(path: str) -> tuple[str, str]:
 	return icon, subtext
 
 
+def _pade_exp_neg(x: float) -> float:
+	"""Padé (2,2) para exp(-x), válido para x∈[0,3]."""
+	if x >= 3.0:
+		return 0.0
+	x2 = x * x
+	return (12.0 - 6.0 * x + x2) / (12.0 + 6.0 * x + x2)
+
+
+def _fast_sigmoid(x: float) -> float:
+	"""Sigmoid rápida vía tanh, suficiente para ranking."""
+	if x <= -8.0:
+		return 0.0
+	if x >= 8.0:
+		return 1.0
+	return 0.5 * (1.0 + tanh(x * 0.5))
+
+
 class RelevanceScorer:
 	__slots__ = (
+		"_depth_lut",
+		"_time_decay_lut",
 		"depth_penalty",
 		"exec_bonus",
 		"mod_time_half_life",
@@ -307,6 +306,7 @@ class RelevanceScorer:
 	)
 
 	MAX_DEPTH = 12
+	DEPTH_LUT_SIZE = 16
 	CHEAP_DEPTH_PENALTY = 0.02
 	CHEAP_MATCH_THRESHOLD = 1.0
 	MATCH_SATURATION = 1.6
@@ -320,6 +320,15 @@ class RelevanceScorer:
 		self.mod_time_weight = mod_time_weight
 		self.rules = rules
 		self.sigmoid_steepness = sigmoid_steepness
+		# --- Time decay LUT (daily buckets, 1 year) ---
+		self._time_decay_lut = tuple(exp(-d * 86400.0 / self.mod_time_half_life) for d in range(366))
+		self._depth_lut = tuple(log1p(d) * depth_penalty * 5.0 for d in range(self.DEPTH_LUT_SIZE))
+
+	def _time_decay(self, age_seconds: float) -> float:
+		days = int(age_seconds / 86400.0)
+		if 0 <= days < 366:
+			return self._time_decay_lut[days]
+		return exp(-age_seconds / self.mod_time_half_life)
 
 	def quick_score(self, path: str, words: tuple[str, ...]) -> float:
 		path_lower = path.lower()
@@ -352,8 +361,11 @@ class RelevanceScorer:
 					if fnmatch(path_lower, p):
 						score += delta
 
-		depth = min(path.count(os.sep), self.MAX_DEPTH)
-		score -= depth * self.depth_penalty
+		depth = path.count(os.sep)
+		if depth < self.DEPTH_LUT_SIZE:
+			score -= self._depth_lut[depth]
+		else:
+			score -= self._depth_lut[-1]
 
 		basename = os.path.basename(path_lower)
 		name_len = max(1, len(basename))
@@ -367,7 +379,9 @@ class RelevanceScorer:
 				continue
 
 			match_count += 1
-			weight = (exp(-2.5 * pos / name_len) * pow(len(w) / name_len, 0.7)) ** 1.2 * 2.0
+			x = 2.5 * pos / name_len
+			pos_weight = _pade_exp_neg(x)
+			weight = (pos_weight * pow(len(w) / name_len, 0.7)) ** 1.2 * 2.0
 
 			if weight > best_match:
 				best_match = weight
@@ -386,13 +400,11 @@ class RelevanceScorer:
 			if mtime and mtime <= now:
 				age = now - mtime
 				if age >= 0:
-					score += self.mod_time_weight * exp(-age / self.mod_time_half_life)
+					score += self.mod_time_weight * self._time_decay(age)
 
-		bounded = max(-20.0, min(20.0, score))
-		try:
-			return 1.0 / (1.0 + exp(-bounded * self.sigmoid_steepness))
-		except OverflowError:
-			return 1.0 if bounded > 0 else 0.0
+		# bounded = max(-20.0, min(20.0, score * self.sigmoid_steepness))
+		logit = score * self.sigmoid_steepness
+		return _fast_sigmoid(logit)
 
 
 def build_dbus_response(results: list[LightResult]) -> list:
