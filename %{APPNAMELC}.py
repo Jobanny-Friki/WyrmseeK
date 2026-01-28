@@ -1,11 +1,72 @@
 #!/usr/bin/python
 
 """
-+------------+
-|  LINDWYRM  |
-+------------+
+LINDWYRM - The Ancient File Hunter
+A high-performance KRunner plugin for ultra-fast file searching
 
-“Here are dragons...” (it means what you think)
+"Here are dragons..." (it means exactly what you think)
+
+Author: Giovani Flores
+GitHub: https://github.com/Jobanny-Friki
+
+Description:
+    Lindwyrm is a DBus service that integrates seamlessly with KDE Plasma's KRunner
+    (org.kde.krunner1 interface) to provide lightning-fast, context-aware file search.
+
+    It leverages plocate (preferred) or locate as backend, streaming results
+    progressively while applying intelligent relevance ranking to large databases.
+    The design prioritizes minimal perceived latency, robustness, and explainable scoring.
+
+Key Features:
+    * Asynchronous streaming search with configurable debounce (default: 180 ms)
+    * Single-threaded executor to prevent CPU overload
+    * Real-time partial results via MatchesChanged signal
+    * Smart cache reuse for prefix queries (when complete sets are available)
+    * Sophisticated relevance scoring (RelevanceScorer):
+        - Logarithmic depth penalty for nested paths
+        - Positional matching in filenames with exponential decay
+        - Multi-word match saturation with diminishing returns
+        - Modification-time relevance decay (configurable half-life in days)
+        - Bonuses for directories and executable files
+        - Custom pattern-based boost/penalty rules via config.toml
+    * Fast pre-filter (quick_score) to skip low-relevance candidates early
+    * Heavy @lru_cache usage for:
+        - File metadata (stat, human-readable size & age)
+        - Icons and MIME types (Gio + optional python-magic)
+    * Rich subtext with type, size, and modification info
+    * Hard limits for stability:
+        - Partial emission cap: 250 results
+        - Total results: 800
+    * Configurable timeouts and history size
+
+Available Actions:
+    * open       > Open the selected file
+    * parent     > Open the containing folder
+    * copy       > Copy full path to clipboard
+    * copy-uri   > Copy as paste-ready file:// URI
+
+Configuration:
+    Path: ~/.config/locate-krunner/config.toml
+
+    Key options:
+        binary, opts, opener, clipboard_cmd
+        debounce_ms, min_len, process_timeout
+        cache_big, cache_med, history_size
+        mod_time_half_life_days, mod_time_weight, depth_penalty,
+        executable_bonus, directory_bonus, sigmoid_steepness
+        rules (list of pattern > score adjustments)
+
+Dependencies:
+    * plocate (strongly recommended) or locate
+    * Python 3.10+ (3.11+ preferred for tomllib)
+    * dbus-python
+    * PyGObject (Gio, GLib)
+    * tomli / tomllib
+    * python-magic (optional - improves MIME/type detection)
+
+Execution:
+    Runs as DBus service: org.kde.locate
+    Auto-detected by KRunner once installed and running.
 """
 
 import heapq
