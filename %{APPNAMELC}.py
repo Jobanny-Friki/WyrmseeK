@@ -1,5 +1,14 @@
 #!/usr/bin/python
 
+"""
++------------+
+|  LINDWYRM  |
++------------+
+
+“Here are dragons...” (it means what you think)
+"""
+
+import heapq
 import os
 import re
 import select
@@ -9,7 +18,6 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from fnmatch import fnmatch
 from functools import lru_cache
-from operator import itemgetter
 from shlex import split as shlex_split
 from shutil import which
 from signal import SIG_DFL, SIGINT, signal
@@ -28,14 +36,14 @@ import dbus.service
 from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import Gio, GLib  # type: ignore[missing-module-attribute]
 
-MAX_TOTAL_RESULTS = 500
-MAX_PARTIAL_RESULTS = 200
+MAX_TOTAL_RESULTS = 800
+MAX_PARTIAL_RESULTS = 250
 IFACE_KRUNNER = "org.kde.krunner1"
 ICON_UNKNOWN = intern("unknown")
 TYPE_FILE = intern("FILE")
 TYPE_FOLDER = intern("FOLDER")
 TYPE_OCTET = intern("OCTET-STREAM")
-IO_CHUNK_SIZE = 65536
+IO_CHUNK_SIZE = 131072
 MIME_URI = "text/uri-list"
 MIME_TEXT = "text/plain"
 CONFIG_DIR = GLib.get_user_config_dir()
@@ -64,8 +72,8 @@ def read_config(path: str) -> dict[str, Any]:
 
 
 _GLOBAL_CFG = read_config(CONFIG_FILE)
-CACHE_BIG = int(_GLOBAL_CFG.get("cache_big", 4096))
-CACHE_MED = int(_GLOBAL_CFG.get("cache_med", 2048))
+CACHE_BIG = int(_GLOBAL_CFG.get("cache_big", 8192))
+CACHE_MED = int(_GLOBAL_CFG.get("cache_med", 4096))
 
 
 class LightResult(NamedTuple):
@@ -93,29 +101,19 @@ def human_readable_size(size: int) -> str:
 
 
 def human_readable_time(mtime: float | None, now: float) -> str:
-	if not mtime:
+	if mtime is None:
 		return ""
 
-	diff = now - mtime
-	if diff < 0:
-		return ""
+	diff = max(0, now - mtime)
+	if diff < 60:
+		return "Just now"
 
-	intervals = [
-		(60, "Just now"),
-		(3600, "min"),
-		(86400, "hr"),
-		(604800, "days"),
-		(2629746, "weeks"),
-		(31556952, "months"),
-		(float('inf'), "years"),
-	]
+	units = [(31556952, "year"), (2629746, "month"), (604800, "week"), (86400, "day"), (3600, "hour"), (60, "minute")]
 
-	prev_limit = 1
-	for limit, unit in intervals:
-		if diff < limit:
-			return unit if unit == "Just now" else f"{int(diff // prev_limit)} {unit} ago"
-
-		prev_limit = limit
+	for seconds, unit in units:
+		if diff >= seconds:
+			value = int(diff // seconds)
+			return f"{value} {unit}{'s' if value > 1 else ''} ago"
 
 	return "Old"
 
@@ -244,17 +242,18 @@ class RelevanceScorer:
 						score += action
 
 		score -= min(path.count("/"), 12) * self.depth_penalty
-		name_lower = os.path.basename(path_lower)
-		name_len = max(1, len(name_lower))
-		match_sum = 0.0
-		for w in words:
-			idx = name_lower.find(w)
-			if idx != -1:
-				pos_factor = 1.0 if idx == 0 else (1.0 - (idx / name_len))
-				match_sum += (pos_factor * 0.6) + ((len(w) / name_len) * 0.3)
 
-		if match_sum > 0:
-			score += match_sum * 3.0 + len(words) * 0.1
+		name_lower = os.path.basename(path_lower)
+		n = max(1, len(name_lower))
+		matches = []
+
+		for w in words:
+			if (i := name_lower.find(w)) != -1:
+				p = i / n
+				matches.append(1.75 * (2.7183 ** (-2.5 * p)) * ((len(w) / n) ** 0.7))
+
+		if matches:
+			score += max(matches) + 0.3 * (m := len(matches)) * 3.5 / (m + 2.5)
 
 		if is_dir:
 			score += self.dir_bonus
@@ -280,7 +279,7 @@ class RelevanceScorer:
 	def quick_score(self, path: str, words: tuple[str, ...]) -> float:
 		path_lower = path.lower()
 		score = sum(1.0 for w in words if w in path_lower)
-		return max(0.0, score - path.count("/") * 0.01) if score else 0.0
+		return max(0.0, score - path.count("/") * 0.005) if score else 0.0
 
 
 def build_dbus_response(results: list[LightResult]) -> list:
@@ -351,25 +350,25 @@ class Runner(dbus.service.Object):
 			return val if isinstance(val, list) else shlex_split(str(val))
 
 		self.binary = _find_command(str(cfg.get("binary") or "plocate"), "locate") or ""
-		opts = cfg.get("opts", "-i -l 25")
+		opts = cfg.get("opts", "-i")
 		self.opts = tuple(opts if isinstance(opts, list) else shlex_split(str(opts)))
 		if not any(x in self.opts for x in ("-l", "--limit")):
-			self.opts += ("-l", "25")
+			self.opts += ("-l", "200")
 
 		self.opener = _get_list("opener", ["mimeo", "handlr", "xdg-open"])
 		self.clipboard_cmd = _get_list("clipboard_cmd", [])
-		self.min_len = max(1, int(cfg.get("min_len", 3)))
-		self.debounce_ms = int(cfg.get("debounce_ms", 250))
-		self.process_timeout = float(cfg.get("process_timeout", 2.5))
-		self.max_cached_queries = int(cfg.get("history_size", 500))
+		self.min_len = max(1, int(cfg.get("min_len", 2)))
+		self.debounce_ms = int(cfg.get("debounce_ms", 180))
+		self.process_timeout = float(cfg.get("process_timeout", 6.0))
+		self.max_cached_queries = int(cfg.get("history_size", 800))
 		self.scorer = RelevanceScorer(
 			rules=parse_rules(cfg),
-			half_life_days=float(cfg.get("mod_time_half_life_days", 20.0)),
-			mod_time_weight=float(cfg.get("mod_time_weight", 0.25)),
-			depth_penalty=float(cfg.get("depth_penalty", 0.02)),
-			exec_bonus=float(cfg.get("executable_bonus", 0.1)),
-			dir_bonus=float(cfg.get("directory_bonus", 0.2)),
-			sigmoid_steepness=float(cfg.get("sigmoid_steepness", 3.0)),
+			half_life_days=float(cfg.get("mod_time_half_life_days", 30.0)),
+			mod_time_weight=float(cfg.get("mod_time_weight", 0.60)),
+			depth_penalty=float(cfg.get("depth_penalty", 0.015)),
+			exec_bonus=float(cfg.get("executable_bonus", 0.18)),
+			dir_bonus=float(cfg.get("directory_bonus", 0.35)),
+			sigmoid_steepness=float(cfg.get("sigmoid_steepness", 2.2)),
 		)
 		self.search_results = OrderedDict()
 		self._current_query_norm: str | None = None
@@ -411,7 +410,8 @@ class Runner(dbus.service.Object):
 			fd = proc.stdout.fileno()
 			os.set_blocking(fd, False)
 
-			raw_results = []
+			top_k_heap = []
+
 			start_time = time()
 			now = time()
 			paths_seen = total_processed = 0
@@ -449,30 +449,39 @@ class Runner(dbus.service.Object):
 							continue
 
 						paths_seen += 1
-						if paths_seen > MAX_TOTAL_RESULTS * 2:
+						if paths_seen > MAX_TOTAL_RESULTS * 2.5:
 							read_buffer = b""
 							proc.terminate()
 							break
 
-						if paths_seen > 100 and len(raw_results) >= MAX_PARTIAL_RESULTS and self.scorer.quick_score(path, words) < 0.3:
+						if paths_seen > 150 and len(top_k_heap) >= MAX_PARTIAL_RESULTS and self.scorer.quick_score(path, words) < 0.5:
 							continue
 
 						path_lower = path.lower()
 						score = self.scorer.calculate(path, path_lower, words, now)
+
 						if score > 0.01:
-							raw_results.append((path, score))
+							entry = (score, path)
+							if len(top_k_heap) < MAX_TOTAL_RESULTS:
+								heapq.heappush(top_k_heap, entry)
+							else:
+								if score > top_k_heap[0][0]:
+									heapq.heappushpop(top_k_heap, entry)
+
 							total_processed += 1
-							if total_processed % 50 == 0 and total_processed <= MAX_PARTIAL_RESULTS and not self._is_query_stale(norm_query):
-								raw_results.sort(key=itemgetter(1), reverse=True)
-								partial_view = raw_results[:MAX_PARTIAL_RESULTS]
-								final_objs = self._hydrated_results(partial_view)
+
+							if total_processed % 50 == 0 and not self._is_query_stale(norm_query):
+								snapshot = sorted(top_k_heap, reverse=True)
+								partial_candidates = [(p, s) for s, p in snapshot[:MAX_PARTIAL_RESULTS]]
+
+								final_objs = self._hydrated_results(partial_candidates)
 								last_emitted_count = len(final_objs)
 								GLib.idle_add(self.MatchesChanged, norm_query, build_dbus_response(final_objs))
 
 				elif proc.poll() is not None:
 					break
 
-				if paths_seen > MAX_TOTAL_RESULTS * 2:
+				if paths_seen > MAX_TOTAL_RESULTS * 3:
 					break
 
 		except (OSError, subprocess.SubprocessError, ValueError, UnicodeError):
@@ -492,9 +501,9 @@ class Runner(dbus.service.Object):
 		if self._is_query_stale(norm_query):
 			return
 
-		raw_results.sort(key=itemgetter(1), reverse=True)
-		top_raw = raw_results[:MAX_TOTAL_RESULTS]
-		final_results = tuple(self._hydrated_results(top_raw))
+		sorted_heap = sorted(top_k_heap, reverse=True)
+		final_candidates = [(p, s) for s, p in sorted_heap]
+		final_results = tuple(self._hydrated_results(final_candidates))
 
 		GLib.idle_add(self._on_search_finished, norm_query, final_results, last_emitted_count)
 
