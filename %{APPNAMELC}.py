@@ -1,84 +1,23 @@
 #!/usr/bin/python
-
 """
-LINDWYRM - The Ancient File Hunter
-A high-performance KRunner plugin for ultra-fast file searching
++------------+
+|  LINDWYRM  |
++------------+
 
-"Here are dragons..." (it means exactly what you think)
-
-Author: Giovani Flores
-GitHub: https://github.com/Jobanny-Friki
-
-Description:
-    Lindwyrm is a DBus service that integrates seamlessly with KDE Plasma's KRunner
-    (org.kde.krunner1 interface) to provide lightning-fast, context-aware file search.
-
-    It leverages plocate (preferred) or locate as backend, streaming results
-    progressively while applying intelligent relevance ranking to large databases.
-    The design prioritizes minimal perceived latency, robustness, and explainable scoring.
-
-Key Features:
-    * Asynchronous streaming search with configurable debounce (default: 180 ms)
-    * Single-threaded executor to prevent CPU overload
-    * Real-time partial results via MatchesChanged signal
-    * Smart cache reuse for prefix queries (when complete sets are available)
-    * Sophisticated relevance scoring (RelevanceScorer):
-        - Logarithmic depth penalty for nested paths
-        - Positional matching in filenames with exponential decay
-        - Multi-word match saturation with diminishing returns
-        - Modification-time relevance decay (configurable half-life in days)
-        - Bonuses for directories and executable files
-        - Custom pattern-based boost/penalty rules via config.toml
-    * Fast pre-filter (quick_score) to skip low-relevance candidates early
-    * Heavy @lru_cache usage for:
-        - File metadata (stat, human-readable size & age)
-        - Icons and MIME types (Gio + optional python-magic)
-    * Rich subtext with type, size, and modification info
-    * Hard limits for stability:
-        - Partial emission cap: 250 results
-        - Total results: 800
-    * Configurable timeouts and history size
-
-Available Actions:
-    * open       > Open the selected file
-    * parent     > Open the containing folder
-    * copy       > Copy full path to clipboard
-    * copy-uri   > Copy as paste-ready file:// URI
-
-Configuration:
-    Path: ~/.config/locate-krunner/config.toml
-
-    Key options:
-        binary, opts, opener, clipboard_cmd
-        debounce_ms, min_len, process_timeout
-        cache_big, cache_med, history_size
-        mod_time_half_life_days, mod_time_weight, depth_penalty,
-        executable_bonus, directory_bonus, sigmoid_steepness
-        rules (list of pattern > score adjustments)
-
-Dependencies:
-    * plocate (strongly recommended) or locate
-    * Python 3.10+ (3.11+ preferred for tomllib)
-    * dbus-python
-    * PyGObject (Gio, GLib)
-    * tomli / tomllib
-    * python-magic (optional - improves MIME/type detection)
-
-Execution:
-    Runs as DBus service: org.kde.locate
-    Auto-detected by KRunner once installed and running.
+"Here are dragons..." (it means what you think)
 """
 
-import heapq
 import os
 import re
-import select
 import subprocess
+from bisect import bisect_right
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from fnmatch import fnmatch
 from functools import lru_cache
+from heapq import heappush, heappushpop
+from select import select
 from shlex import split as shlex_split
 from shutil import which
 from signal import SIG_DFL, SIGINT, signal
@@ -88,53 +27,55 @@ from time import time
 from typing import Any, NamedTuple
 from urllib.parse import quote_from_bytes
 
+import dbus.service
+from dbus.mainloop.glib import DBusGMainLoop
+from gi.repository import Gio, GLib  # type: ignore[missing-module-attribute]
+
 try:
 	import tomllib
 except ModuleNotFoundError:
 	import tomli as tomllib
 
-import dbus.service
-from dbus.mainloop.glib import DBusGMainLoop
-from gi.repository import Gio, GLib  # type: ignore[missing-module-attribute]
+MAGICMIME = False
+with suppress(ModuleNotFoundError):
+	from magic import from_file as magic_from_file
+
+	MAGICMIME = True
 
 MAX_TOTAL_RESULTS = 800
-MAX_PARTIAL_RESULTS = 250
 IFACE_KRUNNER = "org.kde.krunner1"
 ICON_UNKNOWN = intern("unknown")
 TYPE_FILE = intern("FILE")
 TYPE_FOLDER = intern("FOLDER")
 TYPE_OCTET = intern("OCTET-STREAM")
-IO_CHUNK_SIZE = 131072
+IO_CHUNK_SIZE = 131072  # 1 << 17
 MIME_URI = "text/uri-list"
 MIME_TEXT = "text/plain"
 CONFIG_DIR = GLib.get_user_config_dir()
 CONFIG_FILE = os.path.join(CONFIG_DIR, "locate-krunner", "config.toml")
 
-try:
-	from magic import from_file as magic_from_file
-
-	MAGICMIME = True
-except ModuleNotFoundError:
-	MAGICMIME = False
-
 
 def read_config(path: str) -> dict[str, Any]:
 	try:
+		st = os.stat(path)
+		if (st.st_mode & 0o777) not in (0o400, 0o600) or st.st_uid != os.getuid():
+			return {}
+
 		with open(path, "rb") as f:
 			data = tomllib.load(f)
 
 		settings = data.get("settings", {})
 		if isinstance(settings, dict):
 			data.update(settings)
-
-		return data
-	except (FileNotFoundError, PermissionError, tomllib.TOMLDecodeError, OSError, ValueError):
+	except (OSError, ValueError, tomllib.TOMLDecodeError):
 		return {}
+	else:
+		return data
 
 
 _GLOBAL_CFG = read_config(CONFIG_FILE)
-CACHE_BIG = int(_GLOBAL_CFG.get("cache_big", 8192))
 CACHE_MED = int(_GLOBAL_CFG.get("cache_med", 4096))
+CACHE_BIG = int(_GLOBAL_CFG.get("cache_big", CACHE_MED << 1))
 
 
 class LightResult(NamedTuple):
@@ -148,35 +89,29 @@ def intern_pair(a: str, b: str) -> tuple[str, str]:
 	return intern(a), intern(b)
 
 
+_TIME_TH = [60, 3600, 86400, 604800, 2629746, 31556952]
+_TIME_UN = ["minute", "hour", "day", "week", "month", "year"]
+_SIZE_TH = [1, 1024, 1048576, 1073741824, 1099511627776]
+_SIZE_UN = ["B", "KiB", "MiB", "GiB", "TiB"]
+
+
 def human_readable_size(size: int) -> str:
 	if size == 0:
 		return "0 B"
 
-	for unit in ['B', 'KB', 'MB', 'GB']:
-		if size < 1024.0:
-			return f"{size:.1f} {unit}"
-
-		size /= 1024.0
-
-	return f"{size:.1f} TB"
+	idx = bisect_right(_SIZE_TH, size) - 1
+	return f"{size / _SIZE_TH[idx]:.1f} {_SIZE_UN[idx]}"
 
 
 def human_readable_time(mtime: float | None, now: float) -> str:
 	if mtime is None:
 		return ""
 
-	diff = max(0, now - mtime)
-	if diff < 60:
+	if (d := max(0, now - mtime)) < 60:
 		return "Just now"
 
-	units = [(31556952, "year"), (2629746, "month"), (604800, "week"), (86400, "day"), (3600, "hour"), (60, "minute")]
-
-	for seconds, unit in units:
-		if diff >= seconds:
-			value = int(diff // seconds)
-			return f"{value} {unit}{'s' if value > 1 else ''} ago"
-
-	return "Old"
+	idx = bisect_right(_TIME_TH, d) - 1
+	return f"{(v := d / _TIME_TH[idx]):.1f} {_TIME_UN[idx]}{'s' * (v >= 2)} ago"
 
 
 def _spawn(cmd: list[str]) -> None:
@@ -212,16 +147,25 @@ def _run_subprocess_input(cmd: list[str], text_input: str) -> bool:
 
 
 @lru_cache(maxsize=CACHE_BIG)
-def cached_path_metadata(path: str) -> tuple[bool, float | None, int, int, str, str]:
+def get_raw_stat(path: str) -> tuple[bool, float | None, int, int]:
 	try:
 		stat_info = os.stat(path, follow_symlinks=True)
 		is_dir = (stat_info.st_mode & 0o170000) == 0o040000
-		now = time()
-		nice_size = "" if is_dir else human_readable_size(stat_info.st_size)
-		nice_date = human_readable_time(stat_info.st_mtime, now)
-		return is_dir, stat_info.st_mtime, stat_info.st_size, stat_info.st_mode, nice_size, nice_date
+		return is_dir, stat_info.st_mtime, stat_info.st_size, stat_info.st_mode
 	except (FileNotFoundError, PermissionError, OSError, ValueError):
-		return False, None, 0, 0, "", ""
+		return False, None, 0, 0
+
+
+@lru_cache(maxsize=CACHE_MED)
+def get_display_metadata(path: str) -> tuple[str, str]:
+	is_dir, mtime, size, _ = get_raw_stat(path)
+	if mtime is None and size == 0:
+		return "", ""
+
+	now = time()
+	nice_size = "" if is_dir else human_readable_size(size)
+	nice_date = human_readable_time(mtime, now)
+	return nice_size, nice_date
 
 
 @lru_cache(maxsize=CACHE_BIG)
@@ -250,9 +194,10 @@ def get_icon_for_extension(filename: str) -> tuple[str, str]:
 
 @lru_cache(maxsize=CACHE_MED)
 def get_icon_and_subtext(path: str) -> tuple[str, str]:
-	is_dir, _, _, _, nice_size, nice_date = cached_path_metadata(path)
+	is_dir, _, _, _ = get_raw_stat(path)
+	nice_size, nice_date = get_display_metadata(path)
 	if is_dir:
-		subtext = f"{TYPE_FOLDER} • {nice_date}" if (nice_date and nice_date != "Old") else TYPE_FOLDER
+		subtext = f"{TYPE_FOLDER} • {nice_date}" if nice_date else TYPE_FOLDER
 		return intern_pair("folder", subtext)
 
 	icon, type_str = get_icon_for_extension(os.path.basename(path))
@@ -265,7 +210,7 @@ def get_icon_and_subtext(path: str) -> tuple[str, str]:
 	if nice_size:
 		parts.append(nice_size)
 
-	if nice_date and nice_date != "Old":
+	if nice_date:
 		parts.append(nice_date)
 
 	return icon, " • ".join(parts)
@@ -280,7 +225,6 @@ class RelevanceScorer:
 		depth_penalty: float,
 		exec_bonus: float,
 		dir_bonus: float,
-		sigmoid_steepness: float,
 	) -> None:
 		self.rules = rules
 		self.mod_time_half_life = max(1.0, half_life_days) * 86400.0
@@ -288,14 +232,14 @@ class RelevanceScorer:
 		self.depth_penalty = depth_penalty
 		self.exec_bonus = exec_bonus
 		self.dir_bonus = dir_bonus
-		self.sigmoid_steepness = sigmoid_steepness
 
 	def calculate(self, path: str, path_lower: str, words: tuple[str, ...], now: float) -> float:
-		is_dir, mtime, size, mode, _, _ = cached_path_metadata(path)
+		is_dir, mtime, size, mode = get_raw_stat(path)
 		if not is_dir and size == 0:
 			return 0.0
 
 		score = 0.0
+
 		if self.rules:
 			for patterns, action in self.rules:
 				for p in patterns:
@@ -306,15 +250,12 @@ class RelevanceScorer:
 
 		name_lower = os.path.basename(path_lower)
 		n = max(1, len(name_lower))
-		matches = []
-
-		for w in words:
-			if (i := name_lower.find(w)) != -1:
-				p = i / n
-				matches.append(1.75 * (2.7183 ** (-2.5 * p)) * ((len(w) / n) ** 0.7))
-
-		if matches:
-			score += max(matches) + 0.3 * (m := len(matches)) * 3.5 / (m + 2.5)
+		if matches := [
+			1.75 * (2.7183 ** (-0.8 * (i / n))) * ((len(w) / n) ** 0.7)
+			for w in words
+			if (i := name_lower.find(w)) != -1
+		]:
+			score += max(matches) + (m := len(matches)) * 0.7 / (m + 2.5)
 
 		if is_dir:
 			score += self.dir_bonus
@@ -322,29 +263,39 @@ class RelevanceScorer:
 			if mode & 0o111:
 				score += self.exec_bonus
 
-			if mtime and mtime <= now:
-				logit = max(0.0, now - mtime) / self.mod_time_half_life
-				if logit < 9.2:
-					bonus = self.mod_time_weight if logit <= 0.001 else self.mod_time_weight * 2.7183 ** (-logit)
-					score += bonus
+			if mtime and mtime <= now and (logit := max(0.0, now - mtime) / self.mod_time_half_life) < 7:
+				score += self.mod_time_weight if logit <= 0.001 else self.mod_time_weight * 2.7183 ** (-logit)
 
-		logit = score * self.sigmoid_steepness
-		if logit <= -8.8:
+		if score <= -7:
 			return 0.0
 
-		if logit >= 8.8:
+		if score >= 7:
 			return 1.0
 
-		return 1.0 / (1.0 + 2.718281828459045 ** (-logit))
+		return 1.0 / (1.0 + 2.7183 ** (-score))
 
 	def quick_score(self, path: str, words: tuple[str, ...]) -> float:
-		path_lower = path.lower()
-		score = sum(1.0 for w in words if w in path_lower)
+		basename_lower = os.path.basename(path.lower())
+		score = sum(1.0 for w in words if w in basename_lower)
 		return max(0.0, score - path.count("/") * 0.005) if score else 0.0
 
 
+_CATEG_TH = [5, 20, 40, 60, 85]
+_CATEG_MR = [0, 10, 30, 50, 70, 100]
+
+
 def build_dbus_response(results: list[LightResult]) -> list:
-	return [(r.path, os.path.basename(r.path), r.icon, 100, r.score, {"subtext": r.subtext}) for r in results[:MAX_TOTAL_RESULTS]]
+	return [
+		(
+			r.path,
+			os.path.basename(r.path),
+			r.icon,
+			_CATEG_MR[bisect_right(_CATEG_TH, r.score * 100)],
+			r.score,
+			{"subtext": r.subtext},
+		)
+		for r in results[:MAX_TOTAL_RESULTS]
+	]
 
 
 @lru_cache(maxsize=CACHE_MED)
@@ -361,7 +312,11 @@ def filter_existing_results(results: tuple[LightResult, ...], words: tuple[str, 
 		return build_dbus_response(list(results))
 
 	regex = _compile_filter_regex(words)
-	filtered = [r for r in results if regex.search(r.path)] if regex else [r for r in results if all(w in r.path.lower() for w in words)]
+	filtered = (
+		[r for r in results if regex.search(r.path)]
+		if regex
+		else [r for r in results if all(w in r.path.lower() for w in words)]
+	)
 	return build_dbus_response(filtered)
 
 
@@ -397,6 +352,7 @@ def parse_rules(config: dict) -> tuple:
 	return tuple(parsed)
 
 
+# ruff: disable[ANN201]
 class Runner(dbus.service.Object):
 	def __init__(self) -> None:
 		super().__init__(dbus.service.BusName("org.kde.locate", dbus.SessionBus()), "/runner")
@@ -429,17 +385,12 @@ class Runner(dbus.service.Object):
 			depth_penalty=float(cfg.get("depth_penalty", 0.015)),
 			exec_bonus=float(cfg.get("executable_bonus", 0.18)),
 			dir_bonus=float(cfg.get("directory_bonus", 0.35)),
-			sigmoid_steepness=float(cfg.get("sigmoid_steepness", 2.2)),
 		)
 		self.search_results = OrderedDict()
 		self._current_query_norm: str | None = None
 		self._query_lock = Lock()
 		self.executor = ThreadPoolExecutor(max_workers=1)
 		self._debounce_timer = None
-
-	@dbus.service.signal(IFACE_KRUNNER, signature="sa(sssida{sv})")
-	def MatchesChanged(self, query: str, results: list) -> None:
-		pass
 
 	def _is_query_stale(self, query: str) -> bool:
 		with self._query_lock:
@@ -457,7 +408,7 @@ class Runner(dbus.service.Object):
 		if self._is_query_stale(norm_query) or not self.binary:
 			return
 
-		cmd = [self.binary, *self.opts, "--", *words]
+		cmd = [self.binary, *self.opts, *words]
 		proc = None
 		try:
 			proc = subprocess.Popen(
@@ -467,17 +418,11 @@ class Runner(dbus.service.Object):
 				bufsize=IO_CHUNK_SIZE,
 				start_new_session=True,
 			)
-
 			fd = proc.stdout.fileno()
 			os.set_blocking(fd, False)
-
 			top_k_heap = []
-
-			start_time = time()
-			now = time()
-			paths_seen = total_processed = 0
-			last_emitted_count = 0
-
+			start_time = now = time()
+			paths_seen = 0
 			read_buffer = b""
 
 			while True:
@@ -489,60 +434,40 @@ class Runner(dbus.service.Object):
 					proc.terminate()
 					break
 
-				ready, _, _ = select.select([fd], [], [], 0.05)
-
+				ready, _, _ = select([fd], [], [], 0.05)
 				if fd in ready:
 					chunk = proc.stdout.read(IO_CHUNK_SIZE)
 					if not chunk:
 						break
 
 					read_buffer += chunk
-
 					while b"\n" in read_buffer:
 						line_bytes, read_buffer = read_buffer.split(b"\n", 1)
-
 						try:
-							raw = os.fsdecode(line_bytes)
-							if "\x00" in raw:
+							path = os.fsdecode(line_bytes)
+							if "\x00" in path:
 								continue
-							path = raw
 						except (UnicodeDecodeError, ValueError):
 							continue
 
 						paths_seen += 1
-						if paths_seen > MAX_TOTAL_RESULTS * 2.5:
+						if paths_seen > MAX_TOTAL_RESULTS * 3:  # Unificado el umbral para evitar redundancia
 							read_buffer = b""
 							proc.terminate()
 							break
 
-						if paths_seen > 150 and len(top_k_heap) >= MAX_PARTIAL_RESULTS and self.scorer.quick_score(path, words) < 0.5:
-							continue
-
 						path_lower = path.lower()
 						score = self.scorer.calculate(path, path_lower, words, now)
+						if score <= 0.01:
+							continue
 
-						if score > 0.01:
-							entry = (score, path)
-							if len(top_k_heap) < MAX_TOTAL_RESULTS:
-								heapq.heappush(top_k_heap, entry)
-							else:
-								if score > top_k_heap[0][0]:
-									heapq.heappushpop(top_k_heap, entry)
-
-							total_processed += 1
-
-							if total_processed % 50 == 0 and not self._is_query_stale(norm_query):
-								snapshot = sorted(top_k_heap, reverse=True)
-								partial_candidates = [(p, s) for s, p in snapshot[:MAX_PARTIAL_RESULTS]]
-
-								final_objs = self._hydrated_results(partial_candidates)
-								last_emitted_count = len(final_objs)
-								GLib.idle_add(self.MatchesChanged, norm_query, build_dbus_response(final_objs))
+						entry = (score, path)
+						if len(top_k_heap) < MAX_TOTAL_RESULTS:
+							heappush(top_k_heap, entry)
+						elif score > top_k_heap[0][0]:
+							heappushpop(top_k_heap, entry)
 
 				elif proc.poll() is not None:
-					break
-
-				if paths_seen > MAX_TOTAL_RESULTS * 3:
 					break
 
 		except (OSError, subprocess.SubprocessError, ValueError, UnicodeError):
@@ -557,25 +482,22 @@ class Runner(dbus.service.Object):
 						except subprocess.TimeoutExpired:
 							proc.kill()
 							proc.wait()
+
 					proc.stdout.close()
 
 		if self._is_query_stale(norm_query):
 			return
 
-		sorted_heap = sorted(top_k_heap, reverse=True)
-		final_candidates = [(p, s) for s, p in sorted_heap]
+		top_results = sorted(top_k_heap, reverse=True)
+		final_candidates = [(path, score) for score, path in top_results]
 		final_results = tuple(self._hydrated_results(final_candidates))
+		GLib.idle_add(self._on_search_finished, norm_query, final_results)
 
-		GLib.idle_add(self._on_search_finished, norm_query, final_results, last_emitted_count)
-
-	def _on_search_finished(self, query: str, results: tuple[LightResult, ...], last_emitted_count: int) -> bool:
+	def _on_search_finished(self, query: str, results: tuple[LightResult, ...]) -> bool:
 		if not self._is_query_stale(query):
 			self.search_results[query] = results
 			if len(self.search_results) > self.max_cached_queries:
 				self.search_results.popitem(last=False)
-
-			if len(results) != last_emitted_count:
-				GLib.idle_add(self.MatchesChanged, query, build_dbus_response(list(results)))
 
 		return False
 
@@ -629,7 +551,7 @@ class Runner(dbus.service.Object):
 		if not data or "\x00" in data:
 			return
 
-		safe_path = os.path.normpath(data)
+		safe_path = os.path.realpath(data)
 		if not action_id or action_id == "open":
 			if self.opener:
 				_spawn([*self.opener, safe_path])
@@ -643,16 +565,24 @@ class Runner(dbus.service.Object):
 			self._exec_clipboard(uri, MIME_URI)
 
 	def _exec_clipboard(self, data: str, mime_type: str) -> bool:
-		if mime_type == MIME_TEXT and self.clipboard_cmd and _run_subprocess_input(self.clipboard_cmd, data):
+		if "\x00" in data:
+			return False
+
+		safe_data = data[:8192]  # 8KB
+		if mime_type == MIME_TEXT and self.clipboard_cmd and _run_subprocess_input(self.clipboard_cmd, safe_data):
 			return True
 
 		candidates = []
 		if mime_type == MIME_URI:
 			candidates.extend([("wl-copy", "--type", mime_type), ("xclip", "-selection", "clipboard", "-t", mime_type)])
 		else:
-			candidates.extend([("wl-copy",), ("xclip", "-selection", "clipboard", "-in"), ("xsel", "--clipboard", "--input")])
+			candidates.extend([
+				("wl-copy",),
+				("xclip", "-selection", "clipboard", "-in"),
+				("xsel", "--clipboard", "--input"),
+			])
 
-		return any(which(cmd[0]) and _run_subprocess_input(list(cmd), data) for cmd in candidates)
+		return any(which(cmd[0]) and _run_subprocess_input(list(cmd), safe_data) for cmd in candidates)
 
 
 if __name__ == "__main__":
