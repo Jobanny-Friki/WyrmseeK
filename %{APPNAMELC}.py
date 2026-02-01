@@ -8,6 +8,7 @@
 """
 
 import os
+import pickle  # noqa: S403
 import re
 import subprocess
 from bisect import bisect_right
@@ -20,7 +21,7 @@ from heapq import heappush, heappushpop
 from select import select
 from shlex import split as shlex_split
 from shutil import which
-from signal import SIG_DFL, SIGINT, signal
+from signal import SIGINT, SIGTERM, signal
 from sys import intern
 from threading import Lock
 from time import time
@@ -51,8 +52,10 @@ TYPE_OCTET = intern("OCTET-STREAM")
 IO_CHUNK_SIZE = 131072  # 1 << 17
 MIME_URI = "text/uri-list"
 MIME_TEXT = "text/plain"
-CONFIG_DIR = GLib.get_user_config_dir()
-CONFIG_FILE = os.path.join(CONFIG_DIR, "locate-krunner", "config.toml")
+CFG_DIR_P = GLib.get_user_config_dir()
+CFG_DIR_N = "locate-krunner"
+CONFIG_FILE = os.path.join(CFG_DIR_P, CFG_DIR_N, "config.toml")
+CACHE_FILE = os.path.join(CFG_DIR_P, CFG_DIR_N, "cache.pkl")
 
 
 def read_config(path: str) -> dict[str, Any]:
@@ -386,11 +389,41 @@ class Runner(dbus.service.Object):
 			exec_bonus=float(cfg.get("executable_bonus", 0.18)),
 			dir_bonus=float(cfg.get("directory_bonus", 0.35)),
 		)
-		self.search_results = OrderedDict()
+
+		self.search_results = self._load_cache()
 		self._current_query_norm: str | None = None
 		self._query_lock = Lock()
 		self.executor = ThreadPoolExecutor(max_workers=1)
 		self._debounce_timer = None
+
+	def _load_cache(self) -> OrderedDict:
+		try:
+			st = os.stat(CACHE_FILE)
+			if (st.st_mode & 0o777) != 0o600 or st.st_uid != os.getuid():
+				return OrderedDict()
+
+			with open(CACHE_FILE, "rb") as f:
+				data = pickle.load(f)  # noqa: S301
+				if isinstance(data, OrderedDict):
+					if len(data) > self.max_cached_queries:
+						while len(data) > self.max_cached_queries:
+							data.popitem(last=False)
+
+					return data
+		except (FileNotFoundError, EOFError, pickle.UnpicklingError, OSError, ValueError):
+			pass
+
+		return OrderedDict()
+
+	def save_cache(self) -> None:
+		try:
+			os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
+			with open(CACHE_FILE, "wb") as f:
+				pickle.dump(self.search_results, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+			os.chmod(CACHE_FILE, 0o600)
+		except OSError:
+			pass
 
 	def _is_query_stale(self, query: str) -> bool:
 		with self._query_lock:
@@ -451,7 +484,7 @@ class Runner(dbus.service.Object):
 							continue
 
 						paths_seen += 1
-						if paths_seen > MAX_TOTAL_RESULTS * 3:  # Unificado el umbral para evitar redundancia
+						if paths_seen > MAX_TOTAL_RESULTS * 3:
 							read_buffer = b""
 							proc.terminate()
 							break
@@ -587,8 +620,15 @@ class Runner(dbus.service.Object):
 
 if __name__ == "__main__":
 	DBusGMainLoop(set_as_default=True)
-	signal(SIGINT, SIG_DFL)
-	Runner()
+	runner = Runner()
 	loop = GLib.MainLoop()
+
+	def quit_handler(_, __):  # noqa: ANN001
+		runner.save_cache()
+		loop.quit()
+
+	signal(SIGINT, quit_handler)
+	signal(SIGTERM, quit_handler)
+
 	with suppress(KeyboardInterrupt):
 		loop.run()
