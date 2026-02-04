@@ -4,10 +4,12 @@
 |  LINDWYRM  |
 +------------+
 
-“Here be dragons. Handled.”
+"Here be dragons. Handled."
 """
 
 import json
+import logging
+import logging.handlers
 import os
 import subprocess
 import zlib
@@ -23,7 +25,7 @@ from select import select
 from shlex import split as shlex_split
 from shutil import which
 from signal import SIGINT, SIGTERM, signal
-from sys import intern, stderr
+from sys import intern
 from threading import Lock
 from time import time
 from typing import Any, NamedTuple
@@ -39,12 +41,27 @@ except ModuleNotFoundError:
 	import tomli as tomllib
 
 
+logger = logging.getLogger("lindwyrm")
+logger.setLevel(logging.INFO)
+
+try:
+    addr = next(p for p in ("/dev/log", "/var/run/syslog") if os.path.exists(p))
+    handler = logging.handlers.SysLogHandler(addr)
+    fmt = 'lindwyrm[%(process)d]: %(levelname)s - %(message)s'
+except (OSError, FileNotFoundError, StopIteration):
+    handler = logging.StreamHandler()
+    fmt = '%(asctime)s - lindwyrm - %(levelname)s - %(message)s'
+
+handler.setFormatter(logging.Formatter(fmt))
+logger.addHandler(handler)
+
 def read_config(path: str) -> dict[str, Any]:
 	try:
 		fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
 		st = os.fstat(fd)
 		if (st.st_mode & 0o777) not in (0o400, 0o600) or st.st_uid != os.getuid():
 			os.close(fd)
+			logger.warning(f"Config file has incorrect permissions or ownership: {path}")
 			return {}
 
 		with os.fdopen(fd, "rb") as f:
@@ -52,29 +69,35 @@ def read_config(path: str) -> dict[str, Any]:
 
 		return {**data, **data.get("settings", {})}
 	except (OSError, ValueError, tomllib.TOMLDecodeError):
+		logger.exception(f"Failed to load config from {path}")
 		return {}
 
 
-CFG_DIR = os.path.join(GLib.get_user_config_dir(), "locate-krunner")
-CONFIG_FILE = os.path.join(CFG_DIR, "config.toml")
+DBUS_BUSNAME = "org.kde.lindwyrm"
+PROG_DIRNAME = "lindwyrm"
+IFACE_KRUNNER = "org.kde.krunner1"
+
+CONFIG_FILE = os.path.join(GLib.get_user_config_dir(), PROG_DIRNAME, "config.toml")
+CACHE_FILE = os.path.join(GLib.get_user_cache_dir(), PROG_DIRNAME, "cache.json.zlib")
 _GLOBAL_CFG = read_config(CONFIG_FILE)
+
 CACHE_MED = int(_GLOBAL_CFG.get("cache_med", 4096))
 CACHE_BIG = int(_GLOBAL_CFG.get("cache_big", 8192))
+
+IO_CHUNK_SIZE = 131072
 MAX_TOTAL_RESULTS = 800
-IFACE_KRUNNER = "org.kde.krunner1"
+
 ICON_UNKNOWN = intern("unknown")
 TYPE_FILE = intern("FILE")
 TYPE_FOLDER = intern("FOLDER")
 TYPE_OCTET = intern("OCTET-STREAM")
-IO_CHUNK_SIZE = 131072
+
 MIME_URI = "text/uri-list"
 MIME_TEXT = "text/plain"
-CACHE_FILE = os.path.join(CFG_DIR, "cache.json.zlib")
 MAGICMIME = False
 
 with suppress(ModuleNotFoundError):
 	from magic import from_file as magic_from_file
-
 	MAGICMIME = True
 
 CLIPBOARD_PROVIDERS = {
@@ -224,7 +247,7 @@ def get_icon_and_subtext(path: str) -> tuple[str, str]:
 	is_dir, _, _, _ = get_raw_stat(path)
 	nice_size, nice_date = get_display_metadata(path)
 	if is_dir:
-		subtext = f"{TYPE_FOLDER} • {nice_date}" if nice_date else TYPE_FOLDER
+		subtext = f"{TYPE_FOLDER} * {nice_date}" if nice_date else TYPE_FOLDER
 		return intern_pair("folder", subtext)
 
 	icon, type_str = get_icon_for_extension(os.path.basename(path))
@@ -235,7 +258,7 @@ def get_icon_and_subtext(path: str) -> tuple[str, str]:
 
 	parts = [type_str.split("/")[-1].upper()]
 	parts.extend(filter(None, [nice_size, nice_date]))
-	return icon, " • ".join(parts)
+	return icon, " * ".join(parts)
 
 
 class RelevanceScorer:
@@ -303,7 +326,7 @@ def build_dbus_response(results: list[LightResult]) -> list:
 
 class Runner(dbus.service.Object):
 	def __init__(self) -> None:
-		super().__init__(dbus.service.BusName("org.kde.locate", dbus.SessionBus()), "/runner")
+		super().__init__(dbus.service.BusName(DBUS_BUSNAME, dbus.SessionBus()), "/runner")
 		self.cfg = _GLOBAL_CFG
 
 		def get_val(key: str, default: Any, type_fn: Callable = str) -> Any:
@@ -320,6 +343,7 @@ class Runner(dbus.service.Object):
 			return val if isinstance(val, list) else shlex_split(str(val))
 
 		self.binary = _find_command(get_val("binary", "plocate"), "locate") or ""
+
 		opts = self.cfg.get("opts", "-i")
 		self.opts = tuple(opts if isinstance(opts, list) else shlex_split(str(opts)))
 		if not any(x in self.opts for x in ("-l", "--limit")):
@@ -331,6 +355,9 @@ class Runner(dbus.service.Object):
 		self.debounce_ms = get_val("debounce_ms", 180, int)
 		self.process_timeout = get_val("process_timeout", 6.0, float)
 		self.max_cached = get_val("history_size", 800, int)
+
+		logger.info(f"Runner initialized - binary: {self.binary}, min_len: {self.min_len}, debounce: {self.debounce_ms}ms")
+
 		weights = RelevanceWeights(
 			half_life=get_val("mod_time_half_life_days", 30.0, float),
 			mod_time=get_val("mod_time_weight", 0.60, float),
@@ -338,6 +365,7 @@ class Runner(dbus.service.Object):
 			exec_bonus=get_val("executable_bonus", 0.18, float),
 			dir_bonus=get_val("directory_bonus", 0.35, float),
 		)
+
 		self.scorer = RelevanceScorer(self._parse_rules(), weights)
 		self.search_results = self._load_cache()
 		self._current_query_norm: str | None = None
@@ -362,6 +390,7 @@ class Runner(dbus.service.Object):
 			except (ValueError, TypeError):
 				continue
 
+		logger.debug(f"Parsed {len(rules)} scoring rules from configuration")
 		return tuple(rules)
 
 	def _load_cache(self) -> OrderedDict:
@@ -370,7 +399,9 @@ class Runner(dbus.service.Object):
 			st = os.fstat(fd)
 			if (st.st_mode & 0o777) != 0o600 or st.st_uid != os.getuid():
 				os.close(fd)
+				logger.warning("Cache file has incorrect permissions or ownership")
 				return OrderedDict()
+
 			with os.fdopen(fd, "rb") as f:
 				raw = json.loads(zlib.decompress(f.read()))
 
@@ -384,8 +415,10 @@ class Runner(dbus.service.Object):
 			while len(validated) > self.max_cached:
 				validated.popitem(last=False)
 
+			logger.info(f"Cache loaded successfully with {len(validated)} entries")
 			return validated
 		except (FileNotFoundError, json.JSONDecodeError, zlib.error, OSError, ValueError):
+			logger.exception("Failed to load cache")
 			return OrderedDict()
 
 	def save_cache(self) -> None:
@@ -397,8 +430,9 @@ class Runner(dbus.service.Object):
 			fd = os.open(CACHE_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 			with os.fdopen(fd, "wb") as f:
 				f.write(zlib.compress(json.dumps(serializable, ensure_ascii=False).encode("utf-8"), level=6))
-		except (OSError, ValueError) as e:
-			print(f"Cache save failed: {e!r}", file=stderr)
+			logger.info(f"Cache saved successfully with {len(self.search_results)} entries")
+		except (OSError, ValueError):
+			logger.exception("Cache save failed")
 
 	def _is_query_stale(self, query: str) -> bool:
 		with self._query_lock:
@@ -534,9 +568,11 @@ class Runner(dbus.service.Object):
 	@dbus.service.method(IFACE_KRUNNER, in_signature="ss")
 	def Run(self, data: str, action_id: str) -> None:
 		if not (safe_path := validate_str(os.path.realpath(data))):
+			logger.warning(f"Invalid path received in Run: {data}")
 			return
 
 		action = action_id or "open"
+		logger.info(f"Running action '{action}' on path: {safe_path}")
 		if action == "open" and self.opener:
 			_spawn([*self.opener, safe_path])
 		elif action == "parent" and self.opener:
@@ -548,22 +584,28 @@ class Runner(dbus.service.Object):
 
 	def _exec_clipboard(self, data: str, mime: str) -> bool:
 		if not validate_str(data):
+			logger.warning("Invalid data for clipboard operation")
 			return False
 
 		if mime == MIME_TEXT and self.clipboard_cmd and _run_subprocess_input(self.clipboard_cmd, data[:8192]):
 			return True
 
-		return any(
+		success = any(
 			which(cmd[0]) and _run_subprocess_input(list(cmd), data[:8192]) for cmd in CLIPBOARD_PROVIDERS.get(mime, [])
 		)
+		if not success:
+			logger.warning(f"Clipboard operation failed for mime type: {mime}")
+		return success
 
 
 if __name__ == "__main__":
+	logger.info("Starting Lindwyrm runner")
 	DBusGMainLoop(set_as_default=True)
 	runner = Runner()
 	loop = GLib.MainLoop()
 
 	def quit_handler(*_: Any) -> None:
+		logger.info("Received shutdown signal, saving cache and exiting")
 		runner.save_cache()
 		loop.quit()
 
