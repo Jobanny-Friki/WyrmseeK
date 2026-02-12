@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Lindwyrm
+Comment=Locate-based File Runner
+Type=Service
+Icon=planetkde
+X-KDE-PluginInfo-Author=Jobanny-Friki
+X-KDE-PluginInfo-Email=giovanialfredo_secure@protonmail.com
+X-KDE-PluginInfo-Name=lindwyrm
+X-KDE-PluginInfo-Version=1.0
+X-KDE-PluginInfo-License=LGPL
+X-KDE-PluginInfo-EnabledByDefault=true
+X-Plasma-API=DBus
+X-Plasma-DBusRunner-Service=org.kde.lindwyrm

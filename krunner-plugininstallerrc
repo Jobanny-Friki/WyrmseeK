@@ -1,0 +1,2 @@
+MetaDataFile=lindwyrm.desktop
+Exec=/usr/bin/python /home/giovani/.local/share/lindwyrm/lindwyrm.py
